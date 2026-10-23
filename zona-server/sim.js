@@ -69,10 +69,30 @@ const MATS = {
   roof:     { cost: 1500, fx: 'dust', snd: 'stone', hard: true },
 };
 
+const MAPS = {};
 const World = {
-  boxes: [], pickups: [], roads: [], lights: [], trees: [], buildings: [],
-  bound: 118, cs: 0.6, stamp: 0, spawnPlayer: [0, 106],
+  boxes: [], deco: [], rooms: [], pickups: [], roads: [], lights: [], trees: [], buildings: [], signs: [], flat: [], hintWP: [], koth: [],
+  bound: 118, cs: 0.6, stamp: 0, spawnPlayer: [0, 106], LH: 3.2, T: 120,
   waypoints: [], botSpawns: [],
+};
+World.reset = function (id) {
+  const cfg = MAPS[id] || MAPS.poly;
+  Object.assign(this, {
+    boxes: [], deco: [], rooms: [], pickups: [], roads: [], lights: [], trees: [], buildings: [], signs: [], flat: [], hintWP: [], waypoints: [], botSpawns: [],
+    mapId: MAPS[id] ? id : 'poly', mapName: cfg.name, bound: cfg.bound, spawnPlayer: cfg.spawn.slice(), T: cfg.T, pickN: cfg.pick, maxWP: cfg.maxWP,
+    spawnMin: cfg.spawnMin || 55, env: cfg.env, koth: cfg.koth.map(k => k.slice()), hg: null,
+  });
+};
+World.pathSpent = 0;
+World.clock = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+World.generate = function (id) {
+  this.reset(id);
+  MAPS[this.mapId].gen.call(this);
+  this.buildTerrain();
+  this.buildGrid();
+  this.buildNav();
+  this.flood();
+  this.placePickups();
 };
 const CELL = 6, OFF = 130, NC = 44;
 const STEP = 0.5;
@@ -82,6 +102,14 @@ function B(x, y, z, w, h, d, mat, col, opt) {
   const b = { x0: x - w / 2, x1: x + w / 2, y0: y, y1: y + h, z0: z - d / 2, z1: z + d / 2, mat, col: col === undefined ? 0xffffff : col, stamp: 0 };
   if (opt) Object.assign(b, opt);
   World.boxes.push(b);
+  return b;
+}
+
+// декор только для отрисовки: плинтусы, наличники, рамы, лампы — без столкновений и без влияния на пули и навигацию
+function D(x, y, z, w, h, d, mat, col, opt) {
+  const b = { x0: x - w / 2, x1: x + w / 2, y0: y, y1: y + h, z0: z - d / 2, z1: z + d / 2, mat, col: col === undefined ? 0xffffff : col, deco: true };
+  if (opt) Object.assign(b, opt);
+  World.deco.push(b);
   return b;
 }
 
@@ -211,113 +239,179 @@ World.ceilingAt = function (x, z, r, yTop, vy) {
   return false;
 };
 
-/* ---------- навигационная сетка и A* ---------- */
+/* ---------- навигация по поверхностям (несколько этажей) ---------- */
+const NAV_R = 0.42, NAV_STEP = 0.52, NAV_HEAD = 1.65;
 World.buildNav = function () {
-  const cs = this.cs, B_ = this.bound, n = Math.ceil(2 * B_ / cs) + 1, R = 0.5;
+  const cs = this.cs, B_ = this.bound, n = Math.ceil(2 * B_ / cs) + 1, R = NAV_R;
   this.nn = n;
-  const blk = new Uint8Array(n * n);
-  const toI = v => Math.floor((v + B_) / cs);
-  for (const b of this.boxes) {
-    if (b.y0 > 1.6 || b.y1 < 0.45) continue;
-    const i0 = clamp(toI(b.x0 - R), 0, n - 1), i1 = clamp(toI(b.x1 + R), 0, n - 1);
-    const j0 = clamp(toI(b.z0 - R), 0, n - 1), j1 = clamp(toI(b.z1 + R), 0, n - 1);
-    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) blk[j * n + i] = 1;
-  }
+  const start = new Int32Array(n * n + 1), ys = [], cells = [];
   const m = Math.ceil(2 / cs);
-  for (let k = 0; k < n; k++) for (let q = 0; q < m; q++) {
-    blk[q * n + k] = 1; blk[(n - 1 - q) * n + k] = 1; blk[k * n + q] = 1; blk[k * n + n - 1 - q] = 1;
+  const cand = [];
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    const cid = j * n + i;
+    start[cid] = ys.length;
+    if (i < m || j < m || i >= n - m || j >= n - m) continue;
+    const x = -B_ + (i + 0.5) * cs, z = -B_ + (j + 0.5) * cs;
+    const a = ci(x - R), c = ci(x + R), d = ci(z - R), e = ci(z + R);
+    cand.length = 0;
+    if (this.hg) { const nn = this.Hn(x, z); if (nn[1] >= 0.88) cand.push(this.H(x, z)); } else cand.push(0);
+    const cz0 = ci(z), cx0 = ci(x), own = this.grid[cz0 * NC + cx0];
+    for (let k = 0; k < own.length; k++) {
+      const b = own[k];
+      if (b.vis === false || b.nonav) continue;
+      if (x >= b.x0 && x <= b.x1 && z >= b.z0 && z <= b.z1) cand.push(b.y1);
+    }
+    if (!cand.length) continue;
+    cand.sort((p, q) => p - q);
+    let last = -1e9;
+    for (let q = 0; q < cand.length; q++) {
+      const y = cand[q];
+      if (y - last < 0.12) continue;
+      let blocked = false;
+      for (let k = 0; k < own.length; k++) {
+        const b = own[k];
+        if (x >= b.x0 && x <= b.x1 && z >= b.z0 && z <= b.z1 && b.y0 < y - 0.02 && b.y1 > y + 0.02) { blocked = true; break; }
+      }
+      if (blocked) continue;
+      for (let jj = d; jj <= e && !blocked; jj++) for (let ii = a; ii <= c && !blocked; ii++) {
+        const cell = this.grid[jj * NC + ii];
+        for (let k = 0; k < cell.length; k++) {
+          const b = cell[k];
+          if (b.y1 > y + 0.45 && b.y0 < y + NAV_HEAD && x > b.x0 - R && x < b.x1 + R && z > b.z0 - R && z < b.z1 + R) { blocked = true; break; }
+        }
+      }
+      if (blocked) continue;
+      last = y; ys.push(y); cells.push(cid);
+    }
   }
-  if (this.hg) for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
-    const x = -B_ + (i + 0.5) * cs, z = -B_ + (j + 0.5) * cs, nn = this.Hn(x, z);
-    if (nn[1] < 0.88) blk[j * n + i] = 1;
+  start[n * n] = ys.length;
+  this.sStart = start; this.sY = Float32Array.from(ys); this.sCell = Int32Array.from(cells);
+  const N = ys.length;
+  this.g = new Float32Array(N); this.par = new Int32Array(N);
+  this.seen = new Int32Array(N); this.closed = new Int32Array(N); this.pst = 0;
+  // соседи узлов считаем один раз: поиск пути потом работает по готовым связям
+  const adj = this.adj = new Int32Array(N * 8).fill(-1);
+  const DI = [1, -1, 0, 0, 1, 1, -1, -1], DJ = [0, 0, 1, -1, 1, -1, 1, -1];
+  for (let k = 0; k < N; k++) {
+    const cc = cells[k], i = cc % n, j = (cc / n) | 0, y = this.sY[k];
+    for (let d = 0; d < 8; d++) {
+      const a = i + DI[d], b = j + DJ[d];
+      if (a < 0 || b < 0 || a >= n || b >= n) continue;
+      const nn = this.nodeNear(b * n + a, y, NAV_STEP);
+      if (nn < 0) continue;
+      if (d >= 4 && (this.nodeNear(j * n + a, y, NAV_STEP) < 0 || this.nodeNear(b * n + i, y, NAV_STEP) < 0)) continue;
+      adj[k * 8 + d] = nn;
+    }
   }
-  this.blk = blk;
-  this.g = new Float32Array(n * n); this.par = new Int32Array(n * n);
-  this.seen = new Int32Array(n * n); this.closed = new Int32Array(n * n); this.pst = 0;
 };
 World.cellOf = function (x) { return clamp(Math.floor((x + this.bound) / this.cs), 0, this.nn - 1); };
 World.cellPos = function (i) { return -this.bound + (i + 0.5) * this.cs; };
-World.isFree = function (x, z) { return !this.blk[this.cellOf(z) * this.nn + this.cellOf(x)]; };
-World.nearestFree = function (i, j) {
-  const n = this.nn;
-  if (!this.blk[j * n + i]) return [i, j];
-  for (let r = 1; r < 14; r++) {
+World.nodeNear = function (c, y, tol) {
+  let best = -1, bd = tol + 1e-6;
+  for (let k = this.sStart[c], e = this.sStart[c + 1]; k < e; k++) { const d = Math.abs(this.sY[k] - y); if (d < bd) { bd = d; best = k; } }
+  return best;
+};
+World.surfAt = function (x, z, y, tol) { return this.nodeNear(this.cellOf(z) * this.nn + this.cellOf(x), y, tol === undefined ? NAV_STEP : tol); };
+World.isFree = function (x, z, y) { if (y === undefined) y = this.H(x, z); return this.surfAt(x, z, y, 0.7) >= 0; };
+World.nodeX = function (k) { return this.cellPos(this.sCell[k] % this.nn); };
+World.nodeZ = function (k) { return this.cellPos((this.sCell[k] / this.nn) | 0); };
+World.nearestNode = function (x, z, y, needReach) {
+  const n = this.nn, i0 = this.cellOf(x), j0 = this.cellOf(z), rc = needReach && this.reach;
+  for (let r = 0; r < 16; r++) {
+    let best = -1, bd = 1e9;
     for (let dj = -r; dj <= r; dj++) for (let di = -r; di <= r; di++) {
       if (Math.max(Math.abs(di), Math.abs(dj)) !== r) continue;
-      const a = i + di, b = j + dj;
+      const a = i0 + di, b = j0 + dj;
       if (a < 0 || b < 0 || a >= n || b >= n) continue;
-      if (!this.blk[b * n + a]) return [a, b];
+      let k = this.nodeNear(b * n + a, y, 1.3);
+      if (k >= 0 && rc && !rc[k]) { k = -1; for (let q = this.sStart[b * n + a], e = this.sStart[b * n + a + 1], bd2 = 1.3; q < e; q++) { const dd = Math.abs(this.sY[q] - y); if (rc[q] && dd < bd2) { bd2 = dd; k = q; } } }
+      if (k >= 0) { const d = Math.abs(this.sY[k] - y) + Math.hypot(di, dj) * 0.01; if (d < bd) { bd = d; best = k; } }
     }
+    if (best >= 0) return best;
   }
-  return null;
+  return -1;
 };
-World.cellLOS = function (i0, j0, i1, j1) {
-  const n = this.nn, steps = Math.max(Math.abs(i1 - i0), Math.abs(j1 - j0), 1);
-  for (let k = 0; k <= steps; k++) {
+World.nodeLOS = function (a, b) {
+  const n = this.nn, ca = this.sCell[a], cb = this.sCell[b];
+  const i0 = ca % n, j0 = (ca / n) | 0, i1 = cb % n, j1 = (cb / n) | 0;
+  const steps = Math.max(Math.abs(i1 - i0), Math.abs(j1 - j0), 1);
+  let y = this.sY[a];
+  for (let k = 1; k <= steps; k++) {
     const i = Math.round(i0 + (i1 - i0) * k / steps), j = Math.round(j0 + (j1 - j0) * k / steps);
-    if (this.blk[j * n + i]) return false;
+    const q = this.nodeNear(j * n + i, y, NAV_STEP);
+    if (q < 0) return false;
+    y = this.sY[q];
   }
-  return true;
+  return Math.abs(y - this.sY[b]) < 0.3;
 };
-World.findPath = function (sx, sz, tx, tz, maxN) {
-  maxN = maxN || 60000;
-  const n = this.nn, blk = this.blk, g = this.g, par = this.par, seen = this.seen, closed = this.closed;
-  const s = this.nearestFree(this.cellOf(sx), this.cellOf(sz));
-  const t = this.nearestFree(this.cellOf(tx), this.cellOf(tz));
-  if (!s || !t) return null;
-  const st = ++this.pst, goal = t[1] * n + t[0], start = s[1] * n + s[0];
-  const hi = [], hf = [];
+World.findPath = function (sx, sz, tx, tz, maxN, sy, ty) {
+  maxN = maxN || 16000;
+  if (sy === undefined) sy = this.H(sx, sz);
+  if (ty === undefined) ty = sy;
+  const n = this.nn, g = this.g, par = this.par, seen = this.seen, closed = this.closed, sY = this.sY, sCell = this.sCell, adj = this.adj;
+  const start = this.nearestNode(sx, sz, sy, false), goal = this.nearestNode(tx, tz, ty, true);
+  if (start < 0 || goal < 0) return null;
+  if (start === goal) return [[this.nodeX(goal), this.nodeZ(goal), sY[goal]]];
+  const st = ++this.pst;
+  const HI = this._hi || (this._hi = new Int32Array(300000)), HF = this._hf || (this._hf = new Float32Array(300000)), CAP = HI.length;
+  let hn = 0;
   const push = (idx, f) => {
-    let k = hi.length; hi.push(idx); hf.push(f);
-    while (k > 0) { const p = (k - 1) >> 1; if (hf[p] <= f) break; hi[k] = hi[p]; hf[k] = hf[p]; k = p; }
-    hi[k] = idx; hf[k] = f;
+    if (hn >= CAP - 1) return;
+    let k = hn++;
+    while (k > 0) { const p = (k - 1) >> 1; if (HF[p] <= f) break; HI[k] = HI[p]; HF[k] = HF[p]; k = p; }
+    HI[k] = idx; HF[k] = f;
   };
-  const pop = () => {
-    const top = hi[0], li = hi.pop(), lf = hf.pop();
-    if (hi.length) {
-      let k = 0; const L = hi.length;
-      for (;;) {
-        let c = 2 * k + 1; if (c >= L) break;
-        if (c + 1 < L && hf[c + 1] < hf[c]) c++;
-        if (hf[c] >= lf) break;
-        hi[k] = hi[c]; hf[k] = hf[c]; k = c;
-      }
-      hi[k] = li; hf[k] = lf;
-    }
-    return top;
-  };
-  const hh = (i, j) => { const dx = Math.abs(i - t[0]), dz = Math.abs(j - t[1]); return (dx + dz) + (1.414 - 2) * Math.min(dx, dz); };
-  g[start] = 0; par[start] = -1; seen[start] = st; push(start, hh(s[0], s[1]));
+  const gc = sCell[goal], gi = gc % n, gj = (gc / n) | 0, gY = sY[goal];
+  const s0 = sCell[start];
+  g[start] = 0; par[start] = -1; seen[start] = st;
+  push(start, 0);
   let found = false, cnt = 0;
-  const DI = [1, -1, 0, 0, 1, 1, -1, -1], DJ = [0, 0, 1, -1, 1, -1, 1, -1];
-  while (hi.length && cnt++ < maxN) {
-    const cur = pop();
+  const W_ = this.hW || 1.6;
+  let best = start, bestH = 1e9;
+  while (hn > 0 && cnt++ < maxN) {
+    const cur = HI[0];
+    hn--;
+    if (hn > 0) {
+      const li = HI[hn], lf = HF[hn];
+      let k = 0;
+      for (;;) {
+        let c = 2 * k + 1; if (c >= hn) break;
+        if (c + 1 < hn && HF[c + 1] < HF[c]) c++;
+        if (HF[c] >= lf) break;
+        HI[k] = HI[c]; HF[k] = HF[c]; k = c;
+      }
+      HI[k] = li; HF[k] = lf;
+    }
     if (closed[cur] === st) continue;
     closed[cur] = st;
     if (cur === goal) { found = true; break; }
-    const ci_ = cur % n, cj = (cur / n) | 0;
+    { const cc0 = sCell[cur], hx = Math.abs((cc0 % n) - gi), hz = Math.abs(((cc0 / n) | 0) - gj), hv = (hx + hz) - 0.586 * Math.min(hx, hz) + 1.5 * Math.abs(gY - sY[cur]); if (hv < bestH) { bestH = hv; best = cur; } }
+    const cy = sY[cur], gcur = g[cur], base = cur * 8;
     for (let k = 0; k < 8; k++) {
-      const a = ci_ + DI[k], b = cj + DJ[k];
-      if (a < 0 || b < 0 || a >= n || b >= n) continue;
-      const ni = b * n + a;
-      if (blk[ni] || closed[ni] === st) continue;
-      if (k >= 4 && (blk[cj * n + a] || blk[b * n + ci_])) continue;
-      const ng = g[cur] + (k < 4 ? 1 : 1.414);
-      if (seen[ni] !== st || ng < g[ni]) { seen[ni] = st; g[ni] = ng; par[ni] = cur; push(ni, ng + hh(a, b)); }
+      const ni = adj[base + k];
+      if (ni < 0 || closed[ni] === st) continue;
+      const dy = sY[ni] - cy;
+      const ng = gcur + (k < 4 ? 1 : 1.414) + (dy < 0 ? -dy : dy) * 1.5;
+      if (seen[ni] !== st || ng < g[ni]) {
+        seen[ni] = st; g[ni] = ng; par[ni] = cur;
+        const cc = sCell[ni], ddx = Math.abs((cc % n) - gi), ddz = Math.abs(((cc / n) | 0) - gj);
+        push(ni, ng + W_ * ((ddx + ddz) - 0.586 * Math.min(ddx, ddz)) + 1.5 * Math.abs(gY - sY[ni]));
+      }
     }
   }
-  if (!found) return null;
-  const cells = [];
-  for (let c = goal; c !== -1; c = par[c]) cells.push([c % n, (c / n) | 0]);
-  cells.reverse();
-  // спрямление пути по прямой видимости
-  const out = [cells[0]];
+  this.lastExp = cnt; this.partial = false;
+  let end = goal;
+  if (!found) { if (best === start || cnt < maxN) return null; end = best; this.partial = true; }
+  const nodes = [];
+  for (let c = end; c !== -1; c = par[c]) nodes.push(c);
+  nodes.reverse();
+  const out = [nodes[0]];
   let anchor = 0;
-  for (let i = 2; i < cells.length; i++) {
-    if (!this.cellLOS(cells[anchor][0], cells[anchor][1], cells[i][0], cells[i][1])) { out.push(cells[i - 1]); anchor = i - 1; }
+  for (let i = 2; i < nodes.length; i++) {
+    if (!this.nodeLOS(nodes[anchor], nodes[i])) { out.push(nodes[i - 1]); anchor = i - 1; }
   }
-  if (cells.length > 1) out.push(cells[cells.length - 1]);
-  return out.map(c => [this.cellPos(c[0]), this.cellPos(c[1])]);
+  if (nodes.length > 1) out.push(nodes[nodes.length - 1]);
+  return out.map(k => [this.nodeX(k), this.nodeZ(k), sY[k]]);
 };
 
 
@@ -341,9 +435,10 @@ World.buildTerrain = function () {
   const rects = [];
   for (const b of this.buildings) rects.push([b.x0 - 0.6, b.x1 + 0.6, b.z0 - 0.6, b.z1 + 0.6]);
   for (const r of this.roads) rects.push([r.x0 - 1.5, r.x1 + 1.5, r.z0 - 1.5, r.z1 + 1.5]);
-  rects.push([-104, -60, -96, -64]);
+  for (const r of this.flat) rects.push(r);
   rects.push([this.spawnPlayer[0] - 9, this.spawnPlayer[0] + 9, this.spawnPlayer[1] - 9, this.spawnPlayer[1] + 9]);
-  rects.push([-123, 123, -123, -117], [-123, 123, 117, 123], [-123, -117, -123, 123], [117, 123, -123, 123]);
+  const T3 = this.T + 3, T0 = this.T - 3;
+  rects.push([-T3, T3, -T3, -T0], [-T3, T3, T0, T3], [-T3, -T0, -T3, T3], [T0, T3, -T3, T3]);
   const DS = 1.5, DE = 128, DN = Math.round(2 * DE / DS) + 1, INF = 1e6;
   const df = new Float32Array(DN * DN).fill(INF);
   for (const r of rects) {
@@ -481,13 +576,13 @@ function car(x, z, rot, col) {
   B(x, 0.28, z, w, 0.85, d, 'metal', col, { shape: 'car' });
   B(x + (rot ? 0 : -0.1), 1.13, z + (rot ? -0.1 : 0), cw, 0.62, cd, 'metal', col, { shape: 'cab' });
 }
-function tree(x, z, s) {
+function tree(x, z, s, low) {
   s = s || srr(0.8, 1.4);
-  World.trees.push({ x, z, s });
+  World.trees.push({ x, z, s, low: !!low });
   B(x, 0, z, 0.5, 4 * s, 0.5, 'wood', 0x4a3524, { vis: false });
 }
 
-World.generate = function () {
+MAPS.poly = { name: 'Полигон', bound: 118, spawn: [0, 106], T: 120, pick: [9, 7], maxWP: 90, env: 'dusk', koth: [[-4, 7], [38, 18], [-50, -8], [20, -60]], gen: function () {
   srand(20261015);
   const bd = this.buildings;
 
@@ -621,63 +716,613 @@ World.generate = function () {
   B(0, 0, -T, 244, 5, 1, 'concrete', 0x8c897f, { vis: false }); B(0, 0, T, 244, 5, 1, 'concrete', 0x8c897f, { vis: false });
   B(-T, 0, 0, 1, 5, 244, 'concrete', 0x8c897f, { vis: false }); B(T, 0, 0, 1, 5, 244, 'concrete', 0x8c897f, { vis: false });
 
-  this.buildTerrain();
-  this.buildGrid();
-  this.buildNav();
-  this.flood();
-  this.placePickups();
-};
+  this.flat.push([-104, -60, -96, -64]);
+}};
 function pick2(a) { return a[Math.floor(srnd() * a.length)]; }
 
 World.flood = function () {
-  const n = this.nn, reach = new Uint8Array(n * n);
-  const s = this.nearestFree(this.cellOf(this.spawnPlayer[0]), this.cellOf(this.spawnPlayer[1]));
-  const q = [s[1] * n + s[0]]; reach[q[0]] = 1;
+  const n = this.nn, N = this.sY.length, reach = new Uint8Array(N);
+  const sp = this.spawnPlayer, s = this.nearestNode(sp[0], sp[1], this.H(sp[0], sp[1]));
+  const q = [s]; reach[s] = 1;
+  const DI = [1, -1, 0, 0], DJ = [0, 0, 1, -1];
   for (let h = 0; h < q.length; h++) {
-    const c = q[h], i = c % n, j = (c / n) | 0;
-    for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const a = i + di, b = j + dj;
-      if (a < 0 || b < 0 || a >= n || b >= n) continue;
-      const k = b * n + a;
-      if (!reach[k] && !this.blk[k]) { reach[k] = 1; q.push(k); }
-    }
+    const c = q[h];
+    for (let k = 0; k < 4; k++) { const nn = this.adj[c * 8 + k]; if (nn >= 0 && !reach[nn]) { reach[nn] = 1; q.push(nn); } }
   }
   this.reach = reach;
-  // путевые точки и точки появления: равномерная выборка достижимых клеток
+  const reachNode = (x, z, y, tol) => { const k = this.surfAt(x, z, y, tol); return k >= 0 && reach[k] ? k : -1; };
+  this.reachAt = (x, z, y) => reachNode(x, z, y === undefined ? this.H(x, z) : y, 0.9) >= 0;
+  const wpOk = (x, z, y, sp_) => this.waypoints.every(w => Math.hypot(w[0] - x, w[1] - z) + Math.abs(w[2] - y) * 3 > sp_);
   srand(777);
-  const tries = 6000;
-  for (let t = 0; t < tries && this.waypoints.length < 90; t++) {
-    const x = srr(-110, 110), z = srr(-110, 110);
-    const k = this.cellOf(z) * n + this.cellOf(x);
-    if (!reach[k]) continue;
-    if (this.waypoints.every(w => Math.hypot(w[0] - x, w[1] - z) > 9)) this.waypoints.push([x, z]);
+  const R_ = this.bound - 8, maxWP = this.maxWP || 90;
+  for (let t = 0; t < 8000 && this.waypoints.length < maxWP; t++) {
+    const x = srr(-R_, R_), z = srr(-R_, R_), c = this.cellOf(z) * n + this.cellOf(x);
+    const opts = [];
+    for (let k = this.sStart[c]; k < this.sStart[c + 1]; k++) if (reach[k]) opts.push(k);
+    if (!opts.length) continue;
+    const k = opts[Math.floor(srnd() * opts.length)], y = this.sY[k];
+    if (wpOk(x, z, y, 9)) this.waypoints.push([x, z, y]);
   }
   for (const b of this.buildings) {
     if (b.ruin) continue;
-    for (let t = 0; t < 30; t++) {
-      const x = srr(b.x0 + 1.5, b.x1 - 1.5), z = srr(b.z0 + 1.5, b.z1 - 1.5);
-      if (reach[this.cellOf(z) * n + this.cellOf(x)]) { this.waypoints.push([x, z]); break; }
+    const lv = b.levels || 1;
+    for (let l = 0; l < lv; l++) {
+      let got = 0;
+      for (let t = 0; t < 80 && got < (b.wpPer || 1); t++) {
+        const x = srr(b.x0 + 1.5, b.x1 - 1.5), z = srr(b.z0 + 1.5, b.z1 - 1.5), y0 = l * this.LH;
+        const k = reachNode(x, z, y0, 0.6);
+        if (k >= 0 && wpOk(x, z, this.sY[k], 5)) { this.waypoints.push([x, z, this.sY[k]]); got++; }
+      }
     }
   }
+  for (const h of this.hintWP) { const k = reachNode(h[0], h[1], h[2], 0.6); if (k >= 0) this.waypoints.push([h[0], h[1], this.sY[k]]); }
   this.botSpawns = this.waypoints.slice();
 };
 
 World.placePickups = function () {
   srand(4242);
   let med = 0, ammo = 0;
+  const [nm, na] = this.pickN || [9, 7];
   const bs = this.buildings.filter(b => !b.ruin);
-  for (let k = 0; k < 400 && (med < 9 || ammo < 7); k++) {
-    const b = bs[k % bs.length];
+  for (let k = 0; k < 1500 && (med < nm || ammo < na); k++) {
+    const b = bs[k % bs.length], l = Math.floor(srnd() * (b.levels || 1));
     const x = srr(b.x0 + 1, b.x1 - 1), z = srr(b.z0 + 1, b.z1 - 1);
-    if (!this.isFree(x, z) || !this.reach[this.cellOf(z) * this.nn + this.cellOf(x)]) continue;
-    if (this.pickups.some(p => Math.hypot(p.x - x, p.z - z) < 4)) continue;
-    const type = (med < 9 && (med <= ammo || ammo >= 7)) ? 'med' : 'ammo';
+    const nd = this.surfAt(x, z, l * this.LH, 0.6);
+    if (nd < 0 || !this.reach[nd]) continue;
+    const y = this.sY[nd];
+    if (this.pickups.some(p => Math.hypot(p.x - x, p.z - z) + Math.abs(p.y - y) * 3 < 4)) continue;
+    const type = (med < nm && (med <= ammo || ammo >= na)) ? 'med' : 'ammo';
     if (type === 'med') med++; else ammo++;
-    this.pickups.push({ type, x, z, y: this.H(x, z), taken: false });
+    this.pickups.push({ type, x, z, y, taken: false });
   }
 };
 
 if (typeof module !== 'undefined') module.exports = { World, MATS };
+
+/* --- 12_dorms.js --- */
+/* ===== Карта «Общага»: два общежития (3 и 2 этажа), двор, лес, дорога ===== */
+const DLH = 3.2, SLAB = 0.25, STEPN = 10, RISE = 0.16;
+
+// проём по центру c (абсолютная координата вдоль стены)
+function opn(c, t) { const d = OPN[t]; return { a: c - d.w / 2, b: c + d.w / 2, y0: d.y0, y1: d.y1 }; }
+function opw(a, b, y0, y1) { return { a, b, y0, y1 }; }
+
+// стена с проёмами на этаже y; lo/hi — вертикальный диапазон внутри стены (для двухцветной покраски)
+function wallY(ax, c, a0, a1, thk, y, h, mat, col, ops, tex, lo, hi) {
+  lo = lo || 0; if (hi === undefined) hi = h;
+  const list = (ops || []).slice().sort((p, q) => p.a - q.a);
+  const o = tex ? { tex } : null;
+  const seg = (s, e, z0, z1) => {
+    z0 = Math.max(z0, lo); z1 = Math.min(z1, hi);
+    if (e - s < 0.02 || z1 - z0 < 0.02) return;
+    const m = (s + e) / 2, L = e - s;
+    if (ax === 'x') B(m, y + z0, c, L, z1 - z0, thk, mat, col, o); else B(c, y + z0, m, thk, z1 - z0, L, mat, col, o);
+  };
+  let cur = a0;
+  for (const p of list) { seg(cur, p.a, 0, h); seg(p.a, p.b, 0, p.y0); seg(p.a, p.b, p.y1, h); cur = p.b; }
+  seg(cur, a1, 0, h);
+}
+// коридорная стена: зелёная масляная панель снизу, грязно-белый верх
+function paintWall(ax, c, a0, a1, thk, y, h, ops) {
+  wallY(ax, c, a0, a1, thk + 0.03, y, h, 'plaster', 0xffffff, ops, 'paintg', 0, 1.45);
+  wallY(ax, c, a0, a1, thk, y, h, 'plaster', 0xffffff, ops, 'paintw', 1.45, h);
+}
+function sign(ax, dir, x, y, z, txt, w, h, kind) { World.signs.push({ ax, dir, x, y, z, txt, w: w || 0.42, h: h || 0.2, kind: kind || 0 }); }
+function slabAt(f, x0, x1, z0, z1, tex, col) {
+  const y = f * DLH, th = f === 0 ? 0.3 : SLAB, top = f === 0 ? 0.03 : y;
+  B((x0 + x1) / 2, top - th, (z0 + z1) / 2, x1 - x0, th, z1 - z0, 'concrete', 0xb4b0a6, { tex: 'plaster' });
+  B((x0 + x1) / 2, top, (z0 + z1) / 2, x1 - x0, 0.012, z1 - z0, 'concrete', col === undefined ? 0xffffff : col, { tex: tex || 'terrazzo' });
+}
+// система координат помещения: u вдоль x (от вершины vx в сторону away), v от стороны двери zd к дальней стене zf
+function frm(vx, away, zd, zf) { return { vx, away, zd, dz: Math.sign(zf - zd) }; }
+function Bf(fr, u, v, wu, h, dv, y, mat, col, opt) { return B(fr.vx + fr.away * u, y, fr.zd + fr.dz * v, wu, h, dv, mat, col, opt); }
+function Df(fr, u, v, wu, h, dv, y, mat, col, opt) { return D(fr.vx + fr.away * u, y, fr.zd + fr.dz * v, wu, h, dv, mat, col, opt); }
+
+/* ---------- декор без столкновений: рамы, наличники, плинтусы, лампы ---------- */
+const PAINT = 0xe6e2d6, WOODD = 0x4b3b2c;
+// оконная рама в проёме наружной стены; c — ось стены, sg — куда «внутрь здания» (+1/−1), op — проём {a,b,y0,y1}, y — отметка этажа
+function winFrame(ax, c, op, y, sg) {
+  const w = op.b - op.a, h = op.y1 - op.y0, th = 0.06, dt = 0.1, d0 = sg * 0.02 - dt / 2, d1 = sg * 0.02 + dt / 2;
+  const bx = (u0, u1, v0, v1, e0, e1, col) => {
+    if (ax === 'x') D((u0 + u1) / 2, y + v0, c + (e0 + e1) / 2, u1 - u0, v1 - v0, Math.abs(e1 - e0), 'plaster', col, { tex: 'paintw' });
+    else D(c + (e0 + e1) / 2, y + v0, (u0 + u1) / 2, Math.abs(e1 - e0), v1 - v0, u1 - u0, 'plaster', col, { tex: 'paintw' });
+  };
+  bx(op.a, op.a + th, op.y0, op.y1, d0, d1, PAINT); bx(op.b - th, op.b, op.y0, op.y1, d0, d1, PAINT);
+  bx(op.a, op.b, op.y0, op.y0 + th, d0, d1, PAINT); bx(op.a, op.b, op.y1 - th, op.y1, d0, d1, PAINT);
+  const nm = w >= 1.4 ? 2 : w >= 0.85 ? 1 : 0;
+  for (let k = 1; k <= nm; k++) { const m = op.a + w * k / (nm + 1); bx(m - 0.025, m + 0.025, op.y0, op.y1, d0 + 0.02, d1 - 0.02, PAINT); }
+  if (h >= 0.95) { const ty = op.y0 + h * 0.68; bx(op.a, op.b, ty, ty + 0.04, d0 + 0.02, d1 - 0.02, PAINT); }
+  // подоконник внутри и отлив снаружи
+  const fi = sg * 0.15, fo = -sg * 0.15;
+  bx(op.a - 0.05, op.b + 0.05, op.y0 - 0.045, op.y0, Math.min(fi, fi + sg * 0.1), Math.max(fi, fi + sg * 0.1), 0xd8d4c8);
+  bx(op.a - 0.04, op.b + 0.04, op.y0 - 0.04, op.y0 + 0.01, Math.min(fo, fo - sg * 0.07), Math.max(fo, fo - sg * 0.07), 0x9a978d);
+}
+// наличник двери в перегородке: ось стены c, проём [a,b], высота h, толщина стены thk
+function doorFrame(ax, c, a, b, h, thk, y) {
+  const j = 0.07, e = thk + 0.03;
+  const bx = (u0, u1, v0, v1) => { if (ax === 'x') D((u0 + u1) / 2, y + v0, c, u1 - u0, v1 - v0, e, 'wood', WOODD, { tex: 'wood' }); else D(c, y + v0, (u0 + u1) / 2, e, v1 - v0, u1 - u0, 'wood', WOODD, { tex: 'wood' }); };
+  bx(a, a + j, 0, h); bx(b - j, b, 0, h); bx(a, b, h - j, h);
+}
+// плинтус вдоль стены помещения: от u0 до u1 (в системе помещения) на расстоянии v от стороны двери; side: 'v' — вдоль v при заданном u
+function skirtV(fr, u, v0, v1, y) { Df(fr, u, (v0 + v1) / 2, 0.025, 0.1, Math.abs(v1 - v0), y, 'wood', 0x3d3228, { tex: 'wood' }); }
+function skirtU(fr, v, u0, u1, y) { Df(fr, (u0 + u1) / 2, v, Math.abs(u1 - u0), 0.1, 0.025, y, 'wood', 0x3d3228, { tex: 'wood' }); }
+function lampAt(x, y, z, big) { const s = big ? 0.5 : 0.32; D(x, y, z, s, 0.06, big ? 0.16 : s, 'plaster', 0xf0ecdc, { tex: 'paintw' }); }
+
+/* ---------- помещения: зоны, куда мебель не ставится, и контроль пересечений ---------- */
+function mkRoom(fr, W, Dp, y, f) { return { fr, W, D: Dp, y, f, keep: [], occ: [], dropped: 0 }; }
+function rmHit(r, u, v, wu, dv, gap) {
+  for (const k of r.keep) if (Math.abs(u - k.u) < (wu + k.wu) / 2 && Math.abs(v - k.v) < (dv + k.dv) / 2) return true;
+  for (const o of r.occ) if (Math.abs(u - o.u) < (wu + o.wu) / 2 + gap && Math.abs(v - o.v) < (dv + o.dv) / 2 + gap) return true;
+  return false;
+}
+// поставить коробку (центр u,v; размеры по x, y, z), если она в пределах комнаты, не в зоне прохода и не на другой мебели
+function rmPut(r, u, v, wu, h, dv, mat, col, opt, y0) {
+  if (u - wu / 2 < -0.001 || u + wu / 2 > r.W + 0.001 || v - dv / 2 < -0.001 || v + dv / 2 > r.D + 0.001 || rmHit(r, u, v, wu, dv, 0.03)) { r.dropped++; return null; }
+  r.occ.push({ u, v, wu, dv });
+  return Bf(r.fr, u, v, wu, h, dv, r.y + (y0 || 0), mat, col, opt);
+}
+const fcU = (r, d) => (r.fr.away * d > 0 ? '+x' : '-x'); // грань, смотрящая в сторону d по оси u
+const fcV = (r, d) => (r.fr.dz * d > 0 ? '+z' : '-z');   // то же по оси v
+const BEDC = [0x9aa886, 0xa89078, 0x7f93a6, 0xb09a68, 0x9a8190];
+const PICK = a => a[Math.floor(srnd() * a.length) % a.length];
+// предметы вдоль боковой стены: dep — глубина от стены, len — длина вдоль стены
+const ITEM = {
+  bed: { dep: 0.95, len: 2.05, mk(r, u, v) { return rmPut(r, u, v, 0.95, 0.62, 2.05, 'metal', PICK(BEDC), { shape: 'bed', head: r.fr.dz }); } },
+  ward: { dep: 0.58, len: 1.15, mk(r, u, v) { return rmPut(r, u, v, 0.58, 1.95, 1.15, 'wood', PICK([0xb09470, 0x9a7e5c, 0xa88a64]), { shape: 'wardrobe', tex: 'wood' }); } },
+  night: { dep: 0.42, len: 0.42, mk(r, u, v) { const b = rmPut(r, u, v, 0.42, 0.55, 0.42, 'wood', 0x6a5236, { tex: 'wood' }); if (b && srnd() < 0.6) Df(r.fr, u, v, 0.1, 0.28, 0.1, r.y + 0.55, 'metal', 0x2a2a2a); return b; } },
+  desk: {
+    dep: 0.65, len: 1.3, mk(r, u, v, side) {
+      const b = rmPut(r, u, v, 0.65, 0.74, 1.3, 'wood', 0x7a5c3a, { shape: 'table' }); if (!b) return null;
+      rmPut(r, u + (side < 0 ? 1 : -1) * (0.65 / 2 + 0.3), v + (srnd() - 0.5) * 0.4, 0.4, 0.42, 0.4, 'wood', 0x5a4630, { shape: 'stool' });
+      Df(r.fr, u, v - 0.3, 0.3, 0.012, 0.22, r.y + 0.74, 'plaster', 0xe8e4d8); if (srnd() < 0.5) Df(r.fr, u + (side < 0 ? -0.15 : 0.15), v + 0.4, 0.12, 0.3, 0.12, r.y + 0.74, 'metal', 0x2a2a2a);
+      return b;
+    },
+  },
+  shelf: { dep: 0.32, len: 0.95, mk(r, u, v, side) { return rmPut(r, u, v, 0.32, 1.75, 0.95, 'wood', 0x6a5236, { shape: 'bookcase', face: fcU(r, side < 0 ? 1 : -1) }); } },
+  fridge: { dep: 0.6, len: 0.62, mk(r, u, v, side) { return rmPut(r, u, v, 0.6, 1.25, 0.62, 'metal', 0xd8d6cf, { shape: 'fridge', face: fcU(r, side < 0 ? 1 : -1) }); } },
+  sofa: { dep: 0.85, len: 1.9, mk(r, u, v, side) { return rmPut(r, u, v, 0.85, 0.82, 1.9, 'plaster', PICK([0x6a5a48, 0x56604a, 0x5a4a52, 0x4a5662]), { shape: 'sofa', face: fcU(r, side < 0 ? 1 : -1) }); } },
+  tv: { dep: 0.45, len: 0.9, mk(r, u, v, side) { const b = rmPut(r, u, v, 0.45, 0.55, 0.9, 'wood', 0x6a5236, { tex: 'wood' }); if (b) Df(r.fr, u + (side < 0 ? 0.03 : -0.03), v, 0.36, 0.4, 0.62, r.y + 0.55, 'metal', 0x14161a); return b; } },
+  rack: { dep: 0.5, len: 1.0, mk(r, u, v) { return rmPut(r, u, v, 0.5, 2.0, 1.0, 'metal', 0x5b6168, { shape: 'shelf' }); } },
+  crates: { dep: 0.8, len: 0.8, mk(r, u, v) { const b = rmPut(r, u, v, 0.8, 0.8, 0.8, 'wood', 0xb08a5a, { tex: 'crate' }); if (b && srnd() < 0.7) Bf(r.fr, u, v, 0.7, 0.7, 0.7, r.y + 0.8, 'wood', 0xa0805a, { tex: 'crate' }); return b; } },
+  barrel: { dep: 0.62, len: 0.62, mk(r, u, v) { return rmPut(r, u, v, 0.62, 0.95, 0.62, 'metal', PICK([0x44603f, 0x56504a, 0x3f4f6a]), { shape: 'cyl' }); } },
+};
+const TPL = [
+  ['bed', 'night', 'ward'], ['bed', 'bed'], ['bed', 'desk', 'shelf'], ['bed', 'sofa'], ['desk', 'bed', 'ward'], ['bed', 'fridge', 'ward'], ['night', 'bed', 'shelf', 'ward'], ['sofa', 'tv', 'ward'], ['bed', 'night', 'desk'],
+];
+// ряд предметов вдоль боковой стены от дальней (оконной) стены к двери; числа в списке — дополнительные промежутки
+function sideRun(r, side, list) {
+  let ve = r.D - 0.1;
+  for (const nm of list) {
+    if (typeof nm === 'number') { ve -= nm; continue; }
+    const it = ITEM[nm]; if (!it) continue;
+    const v = ve - it.len / 2;
+    if (v - it.len / 2 < 0.1) break;
+    const u = side < 0 ? 0.06 + it.dep / 2 : r.W - 0.06 - it.dep / 2;
+    it.mk(r, u, v, side);
+    ve -= it.len + 0.06;
+  }
+}
+// плакаты, шторы, лампа, плинтус — только визуал
+function roomDeco(r, style, exitU) {
+  const { fr, W, D: Dp } = r, y = r.y;
+  const far = style !== 4 || exitU === undefined;
+  skirtV(fr, 0.0125, 0.0, Dp, y); skirtV(fr, W - 0.0125, 0.0, Dp, y);
+  if (style !== 4) skirtU(fr, Dp - 0.0125, 0.0, W, y);
+  else { skirtU(fr, Dp - 0.0125, 0.0, Math.max(0, exitU - 0.8), y); skirtU(fr, Dp - 0.0125, Math.min(W, exitU + 0.8), W, y); }
+  // входная стена: плинтус по обе стороны проёма
+  skirtU(fr, 0.0125, 0.0, W / 2 - 0.8, y); skirtU(fr, 0.0125, W / 2 + 0.8, W, y);
+  if (style !== 2 || srnd() < 0.5) lampAt(fr.vx + fr.away * W / 2, y + DLH - SLAB - 0.06 - (r.f === 0 ? 0.03 : 0), fr.zd + fr.dz * Dp * 0.5, false);
+  if (style === 4) return;
+  // шторы у окна
+  if (srnd() < 0.55) {
+    const col = PICK([0x7a6a58, 0x5a6a52, 0x6a5a62, 0x8a8068]);
+    for (const s of [-1, 1]) Df(fr, W / 2 + s * 1.0, Dp - 0.06, 0.34, 1.55, 0.05, y + 0.85, 'plaster', col, { tex: 'wallpaper' });
+  }
+  // плакат или доска на боковой стене
+  if (srnd() < 0.5) {
+    const side = srnd() < 0.5 ? 0 : 1, v = 1.4 + srnd() * (Dp - 3), cl = PICK([0xa84a3a, 0x3a6a8a, 0xc8b060, 0x4a7a4a, 0xd8d4c4]);
+    Df(fr, side ? W - 0.012 : 0.012, v, 0.012, 0.7, 0.5, y + 1.25, 'plaster', cl, { tex: 'paintw' });
+  }
+}
+// жилая комната. style: 0 обычная, 1 разгром, 2 почти пустая, 3 кладовка, 4 выход на пожарную лестницу
+function furnishRoom(r, style, exitU) {
+  const { W, D: Dp, fr } = r;
+  r.keep.push({ u: style === 4 ? exitU : W / 2, v: Dp / 2, wu: style === 4 ? 2.2 : 1.5, dv: Dp }); // сквозной проход от двери до окна
+  r.keep.push({ u: W / 2, v: 0.9, wu: 2.5, dv: 1.8 });                                               // площадка у входа
+  if (style === 4) { r.keep.push({ u: (exitU + W / 2) / 2, v: Dp / 2, wu: Math.abs(exitU - W / 2) + 2.0, dv: Dp }); roomDeco(r, 4, exitU); return; }
+  Bf(fr, W / 2, Dp - 0.07, 1.0, 0.65, 0.12, r.y + 0.22, 'metal', 0xcfc9b4, { shape: 'radiator' });
+  if (style === 3) { // кладовка: два коротких стеллажа у одной стены, ящики и бочки в углу, проход свободен
+    const side = srnd() < 0.5 ? -1 : 1;
+    sideRun(r, side, ['rack', 0.9, 'rack']);
+    sideRun(r, -side, ['crates', 0.3, 'crates', 0.5, 'barrel']);
+  } else if (style === 2) {
+    sideRun(r, srnd() < 0.5 ? -1 : 1, PICK([['bed', 'night'], ['desk'], ['sofa'], ['bed']]));
+    if (srnd() < 0.5) sideRun(r, srnd() < 0.5 ? -1 : 1, ['ward']);
+  } else {
+    let L = PICK(TPL), R = PICK(TPL);
+    if (!L.includes('bed') && !R.includes('bed')) R = TPL[0];
+    sideRun(r, -1, L); sideRun(r, 1, R);
+    if (style === 1) { // разгром: часть мебели осталась, на полу обломки и опрокинутый шкаф
+      rmPut(r, W / 2 + (srnd() < 0.5 ? -1 : 1) * 1.55, 2.2 + srnd() * (Dp - 4.4), 0.6, 0.58, 1.9, 'wood', 0x5a4a38, { tex: 'wood' });
+      const nj = 5 + Math.floor(srnd() * 5);
+      for (let k = 0; k < nj; k++) { const s = 0.3 + srnd() * 0.5; rmPut(r, 0.3 + srnd() * (W - 0.6), 0.8 + srnd() * (Dp - 1.2), s * 1.4, 0.16 + srnd() * 0.18, s, 'wood', [0x6a5a48, 0x4a4a46, 0x7a6e5a, 0x3f4a40][k % 4], { shape: 'junk' }); }
+    }
+  }
+  roomDeco(r, style);
+}
+
+/* ---------- холл: сквозной проход шириной 3 м свободен, мебель только у боковых стен ---------- */
+function hallRoom(r) {
+  const { fr, W, D: Dp, y } = r;
+  r.keep.push({ u: W / 2, v: Dp / 2, wu: 3.3, dv: Dp });
+  // вахта слева, шкафчики и скамья справа
+  rmPut(r, 0.06 + 0.35, 3.1, 0.7, 1.05, 1.8, 'wood', 0x5a4632, { shape: 'table' });
+  rmPut(r, 0.06 + 0.9, 3.1, 0.4, 0.42, 0.4, 'wood', 0x4a3a2a, { shape: 'stool' });
+  rmPut(r, W - 0.06 - 0.22, 1.9, 0.44, 1.85, 1.7, 'metal', 0x4f5a52, { shape: 'locker', face: fcU(r, -1) });
+  rmPut(r, W - 0.06 - 0.2, 3.9, 0.4, 0.42, 1.5, 'wood', 0x6a5236, { shape: 'bench' });
+  rmPut(r, 0.06 + 0.3, 5.0, 0.6, 0.5, 0.6, 'wood', 0xb08a5a, { tex: 'crate' });
+  // доска объявлений и огнетушитель — на стенах
+  Df(fr, 0.012, 1.7, 0.02, 0.7, 1.0, y + 1.3, 'wood', 0x9a7a52, { tex: 'wood' });
+  Df(fr, W - 0.04, 5.0, 0.07, 0.38, 0.14, y + 1.0, 'plaster', 0xb0302a, { tex: 'paintw' });
+  skirtV(fr, 0.0125, 0.0, Dp, y); skirtV(fr, W - 0.0125, 0.0, Dp, y);
+  World.lights.push({ x: fr.vx + fr.away * W / 2, y: r.y + DLH - 0.6, z: fr.zd + fr.dz * Dp / 2, col: 0xffe0b0, int: 0.5, dist: 10 });
+  lampAt(fr.vx + fr.away * W / 2, y + DLH - SLAB - 0.06 - (r.f === 0 ? 0.03 : 0), fr.zd + fr.dz * Dp / 2, true);
+}
+
+/* ---------- санузлы и кухня (блоки у лестничных ядер) ---------- */
+// окна «дальней» (наружной продольной) стены блока в координатах u: [от, до, низ, верх]
+const BWIN = { wc: [[2.4, 3.0, 1.65, 2.35], [3.6, 4.2, 1.65, 2.35], [4.8, 5.4, 1.65, 2.35]], shower: [[3.45, 4.35, 1.5, 2.3]], kitchen: [[3.9, 5.1, 1.1, 2.1]] };
+function wcRoom(vx, away, zd, zf, y, kind, L, f) {
+  const fr = frm(vx, away, zd, zf), Dp = Math.abs(zf - zd), r = mkRoom(fr, L, Dp, y, f), tl = 0xcfd2cc;
+  World.lights.push({ x: vx + away * 3, y: y + DLH - 0.5, z: (zd + zf) / 2, col: kind === 'kitchen' ? 0xffe2b0 : 0xe0ecff, int: 0.5, dist: 9 });
+  lampAt(vx + away * 3, y + DLH - SLAB - 0.06 - (f === 0 ? 0.03 : 0), (zd + zf) / 2, false);
+  r.keep.push({ u: 0.85, v: Dp / 2, wu: 1.7, dv: Dp }); // полоса от двери вдоль всей глубины
+  const TW = (u, v, w, d, h) => Bf(fr, u, v, w, h || 1.85, d, y, 'plaster', tl, { tex: 'tile' });
+  skirtV(fr, 0.0125, 0.0, Dp, y); skirtV(fr, L - 0.0125, 0.0, Dp, y); skirtU(fr, Dp - 0.0125, 0.0, L, y); skirtU(fr, 0.0125, 1.7, L, y);
+  if (kind === 'wc') {
+    // три кабинки у дальней стены: перегородки между ними, унитаз у стены
+    for (let k = 0; k <= 3; k++) TW(2.1 + k * 1.2, Dp - 0.78, 0.05, 1.56);
+    for (let k = 0; k < 3; k++) { const uc = 2.7 + k * 1.2; rmPut(r, uc, Dp - 0.33, 0.42, 0.78, 0.6, 'concrete', 0xdad8d0, { shape: 'toilet', far: fr.dz }); r.occ.push({ u: uc, v: Dp - 0.78, wu: 1.1, dv: 1.56 }); }
+    for (let k = 0; k < 2; k++) { const u = 2.6 + k * 0.9; rmPut(r, u, 0.28, 0.55, 0.95, 0.4, 'concrete', 0xdad8d0, { shape: 'sink' }); Df(fr, u, 0.02, 0.5, 0.7, 0.02, y + 1.2, 'metal', 0xaab4b8); }
+    rmPut(r, L - 0.4, 0.35, 0.4, 0.5, 0.4, 'metal', 0x4a5a48, { shape: 'junk' });
+  } else if (kind === 'shower') {
+    for (let k = 0; k <= 3; k++) TW(2.1 + k * 1.2, Dp - 0.78, 0.05, 1.56);
+    for (let k = 0; k < 3; k++) { const uc = 2.7 + k * 1.2; Df(fr, uc, Dp - 0.1, 0.1, 0.1, 0.1, y + 2.1, 'metal', 0x8a8e90); Df(fr, uc, Dp - 0.04, 0.04, 2.1, 0.04, y, 'metal', 0x7d8184); r.occ.push({ u: uc, v: Dp - 0.78, wu: 1.1, dv: 1.56 }); }
+    rmPut(r, 3.6, 0.28, 1.5, 0.42, 0.34, 'wood', 0x6a5a40, { shape: 'bench' });
+    rmPut(r, L - 0.35, 0.6, 0.35, 0.5, 0.5, 'metal', 0x4a5a48, { shape: 'junk' });
+    for (let k = 0; k < 4; k++) Df(fr, 2.3 + k * 0.45, 0.02, 0.05, 0.05, 0.04, y + 1.6, 'metal', 0x8a8e90);
+  } else if (kind === 'kitchen') {
+    for (let k = 0; k < 3; k++) rmPut(r, 2.3 + k * 0.72, Dp - 0.33, 0.62, 0.88, 0.62, 'metal', 0xcfcdc4, { shape: 'stove' });
+    rmPut(r, 4.5, Dp - 0.33, 0.6, 0.95, 0.6, 'concrete', 0xdad8d0, { shape: 'sink' });
+    rmPut(r, 5.25, Dp - 0.34, 0.62, 1.7, 0.62, 'metal', 0xd8d6cf, { shape: 'fridge', face: fcV(r, -1) });
+    rmPut(r, 3.6, Dp * 0.5 - 0.1, 1.8, 0.76, 0.9, 'wood', 0x7a5c3a, { shape: 'table' });
+    for (const [su, sv] of [[2.9, -0.78], [4.3, -0.78], [2.9, 0.78], [4.3, 0.78]]) rmPut(r, su, Dp * 0.5 - 0.1 + sv, 0.38, 0.42, 0.38, 'wood', 0x5a4630, { shape: 'stool' });
+    Df(fr, 3.4, Dp - 0.1, 1.4, 0.5, 0.2, y + 1.55, 'wood', 0x8a7050, { tex: 'wood' }); // навесной шкаф
+  }
+  return r;
+}
+
+/* ---------- лестничное ядро ---------- */
+function stairCore(vx, away, zc, F) {
+  const VEST = 1.6, FL = 2.75, TR = FL / STEPN, LAND0 = VEST + FL, LAND1 = 5.85;
+  const sx = s => vx + away * s;
+  const lanes = { S: [zc + 0.15, zc + 2.25], N: [zc - 2.25, zc - 0.15] };
+  const bx = (s0, s1, z0, z1, y0, y1, mat, col, opt) => B((sx(s0) + sx(s1)) / 2, y0, (z0 + z1) / 2, Math.abs(sx(s1) - sx(s0)), y1 - y0, z1 - z0, mat, col, opt);
+  const flight = (lane, yStart, goesAway, solid) => {
+    for (let k = 1; k <= STEPN; k++) {
+      const s0 = goesAway ? VEST + (k - 1) * TR : LAND0 - k * TR, s1 = s0 + TR, top = yStart + k * RISE;
+      bx(s0, s1, lanes[lane][0], lanes[lane][1], solid ? -0.1 : top - SLAB, top, 'concrete', 0xb9b5ab, { tex: 'stairs' });
+    }
+  };
+  for (let f = 0; f < F - 1; f++) {
+    const yv = f * DLH + (f === 0 ? 0.03 : 0), yl = f * DLH + 1.6;
+    flight('S', yv, true, f === 0);
+    bx(LAND0, LAND1, lanes.N[0], lanes.S[1], f === 0 ? -0.1 : yl - SLAB, yl, 'concrete', 0xb0ada3, { tex: 'stairs' });
+    flight('N', yl, false, f === 0);
+    const yb = (f + 1) * DLH;
+    bx(0.1, VEST, lanes.N[0], lanes.S[1], yb - SLAB, yb, 'concrete', 0xa8a59b, { tex: 'concrete' });
+  }
+  // перегородка между маршами и ограждение сверху
+  const yt = (F - 1) * DLH + 1.1;
+  bx(VEST, LAND0, zc - 0.15, zc + 0.15, -0.1, yt, 'concrete', 0xb4b0a6, { tex: 'paintw' });
+  const ft = (F - 1) * DLH;
+  bx(VEST, VEST + 0.1, lanes.S[0], lanes.S[1], ft, ft + 1.1, 'metal', 0x6a5a45);
+  World.lights.push({ x: sx(2.2), y: (F - 1) * DLH * 0.5 + 2.6, z: zc, col: 0xdfe6ff, int: 0.45, dist: 11 });
+  return { VEST };
+}
+
+/* ---------- лестница-«пожарка» снаружи ---------- */
+function escapeLayout(xs, dirx, F) {
+  const TR = 0.28, N = 20, LL = 2.2, out = [];
+  let x = xs;
+  for (let f = 0; f < F - 1; f++) { x += dirx * N * TR; out.push({ lvl: f + 1, cx: x + dirx * LL / 2 }); x += dirx * LL; }
+  return out;
+}
+function fireEscape(xs, dirx, zFace, dzo, F) {
+  const TR = 0.28, N = 20, LL = 2.2, Wd = 1.8, z0 = zFace + dzo * 0.03, z1 = zFace + dzo * (0.03 + Wd), cz = (z0 + z1) / 2, rz = zFace + dzo * (Wd + 0.0);
+  let x = xs;
+  const col = 0x9a7a58;
+  for (let f = 0; f < F - 1; f++) {
+    const y0 = f * DLH + (f === 0 ? 0.03 : 0);
+    for (let k = 1; k <= N; k++) {
+      const xa = x + dirx * (k - 1) * TR, xb = xa + dirx * TR, top = y0 + k * RISE;
+      B((xa + xb) / 2, f === 0 ? -0.1 : top - 0.1, cz, TR, f === 0 ? top + 0.1 : 0.1, Wd, 'metal', col, { nonav: false });
+      if (k % 2 === 0) B((xa + xb) / 2, top, rz, TR * 2, 1.05, 0.05, 'metal', 0x6a5a4a);
+    }
+    x += dirx * N * TR;
+    const yl = (f + 1) * DLH;
+    B(x + dirx * LL / 2, yl - 0.1, cz, LL, 0.1, Wd, 'metal', col);
+    B(x + dirx * LL / 2, yl, rz, LL, 1.05, 0.05, 'metal', 0x6a5a4a);
+    B(x + dirx * LL, yl, cz, 0.05, 1.05, Wd, 'metal', 0x6a5a4a);
+    x += dirx * LL;
+  }
+}
+
+
+/* ---------- здание ---------- */
+function dorm(o) {
+  const F = o.F, t = 0.3, cw = 2.4, SW = o.SW, n = o.n;
+  const x0 = o.x0, x1 = o.x1, z0 = o.z0, z1 = o.z1, zc = o.zc, cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+  const xb1 = x0 + SW, xb2 = x1 - SW, slot = (xb2 - xb1) / n;
+  const zA = zc - cw / 2 - 0.1, zB = zc + cw / 2 + 0.1, HH = DLH - SLAB, ex = o.ext;
+  const sc = k => xb1 + (k + 0.5) * slot;
+  const ex_side = o.escape ? o.escape.side : 'S';
+  const esc = o.escape ? escapeLayout(o.escape.xs, o.escape.dir, F) : [];
+  const escAt = (lvl) => esc.find(e => e.lvl === lvl);
+  const BLK = [{ vx: xb1, away: -1, xe: x0 + t / 2, kindN: 'wc', kindS: 'shower' }, { vx: xb2, away: 1, xe: x1 - t / 2, kindN: 'kitchen', kindS: 'wc' }];
+  const blkWins = (blk, side) => BWIN[side === 'N' ? blk.kindN : blk.kindS].map(([ua, ub, y0, y1]) => { const xa = blk.vx + blk.away * ua, xb = blk.vx + blk.away * ub; return opw(Math.min(xa, xb), Math.max(xa, xb), y0, y1); });
+  const WIN = (c) => opw(c - 0.8, c + 0.8, 0.95, 2.15); // оконный проём комнаты: 1.6 × 1.2 м, подоконник 0.95
+  // ---- наружные стены ----
+  for (let f = 0; f < F; f++) {
+    const y = f * DLH;
+    const extWall = (ax, c, a0, a1, ops) => {
+      const mid = ax === 'x' ? cz : cx, sg = c < mid ? 1 : -1, ct = c - sg * 0.015, ci_ = c + sg * (t / 2 - 0.015);
+      if (f === 0) {
+        wallY(ax, ct, a0, a1, t - 0.03 + 0.05, y, DLH, 'concrete', 0xffffff, ops, 'concrete', 0, 0.9);
+        wallY(ax, ct, a0, a1, t - 0.03, y, DLH, ex.mat, ex.col, ops, ex.tex, 0.9, DLH);
+      } else wallY(ax, ct, a0, a1, t - 0.03, y, DLH, ex.mat, ex.col, ops, ex.tex);
+      const lo = ax === 'x' ? a0 + t : a0, hi = ax === 'x' ? a1 - t : a1;
+      wallY(ax, ci_, lo, hi, 0.03, y, HH, 'plaster', 0xffffff, ops, 'paintw', 0, HH);
+      return sg;
+    };
+    for (const side of ['N', 'S']) {
+      const ops = [], wins = [], zz = side === 'N' ? z0 : z1;
+      for (let k = 0; k < n; k++) {
+        const hall = f === 0 && ((side === 'S' && k === o.hallS) || (side === 'N' && k === o.hallN));
+        if (hall) { ops.push(opn(sc(k), 'wide')); continue; }
+        const e = side === ex_side ? escAt(f) : null;
+        if (e && Math.abs(e.cx - sc(k)) < slot / 2) ops.push(opn(e.cx, 'door'));
+        else { const w = WIN(sc(k)); ops.push(w); wins.push(w); }
+      }
+      for (const blk of BLK) for (const w of blkWins(blk, side)) { ops.push(w); wins.push(w); }
+      const sg = extWall('x', zz, x0 - t / 2, x1 + t / 2, ops);
+      for (const w of wins) winFrame('x', zz, w, y, sg);
+    }
+    for (const xx of [x0, x1]) {
+      const ops = [], wins = [];
+      if (f < F - 1) wins.push(opw(zc - 0.7, zc + 0.7, 2.55, 3.05));
+      wins.push(opw(zc - 5.4, zc - 4.2, 1.2, 2.2), opw(zc + 4.2, zc + 5.4, 1.2, 2.2));
+      for (const w of wins) ops.push(w);
+      const sg = extWall('z', xx, z0 + t / 2, z1 - t / 2, ops);
+      for (const w of wins) winFrame('z', xx, w, y, sg);
+    }
+  }
+  // ---- этажи ----
+  for (let f = 0; f < F; f++) {
+    const y = f * DLH, yy = y + (f === 0 ? 0.03 : 0);
+    // перекрытия
+    slabAt(f, xb1, xb2, zA - 0.1, zB + 0.1, 'terrazzo');
+    for (let k = 0; k < n; k++) {
+      const a = xb1 + k * slot, b = a + slot;
+      const hallN = f === 0 && k === o.hallN, hallS = f === 0 && k === o.hallS;
+      slabAt(f, a, b, z0 + t / 2, zA - 0.1, hallN ? 'tile' : 'lino');
+      slabAt(f, a, b, zB + 0.1, z1 - t / 2, hallS ? 'tile' : 'lino');
+    }
+    for (const blk of [{ xa: x0 + t / 2, xb: xb1 }, { xa: xb2, xb: x1 - t / 2 }]) {
+      slabAt(f, blk.xa, blk.xb, z0 + t / 2, zc - 2.4 - 0.1, 'tile');
+      slabAt(f, blk.xa, blk.xb, zc + 2.4 + 0.1, z1 - t / 2, 'tile');
+      if (f === 0) slabAt(f, blk.xa, blk.xb, zc - 2.4 - 0.1, zc + 2.4 + 0.1, 'concrete');
+    }
+    // коридорные стены с дверными проёмами и наличниками
+    const opsA = [], opsB = [];
+    for (let k = 0; k < n; k++) {
+      const hallN = f === 0 && k === o.hallN, hallS = f === 0 && k === o.hallS;
+      opsA.push(hallN ? opw(sc(k) - 1.6, sc(k) + 1.6, 0, 2.5) : opn(sc(k), 'door'));
+      opsB.push(hallS ? opw(sc(k) - 1.6, sc(k) + 1.6, 0, 2.5) : opn(sc(k), 'door'));
+      if (!hallN) doorFrame('x', zA, sc(k) - 0.75, sc(k) + 0.75, 2.2, 0.2, yy);
+      if (!hallS) doorFrame('x', zB, sc(k) - 0.75, sc(k) + 0.75, 2.2, 0.2, yy);
+    }
+    paintWall('x', zA, xb1, xb2, 0.2, y, HH, opsA);
+    paintWall('x', zB, xb1, xb2, 0.2, y, HH, opsB);
+    // плинтус коридора вдоль обеих стен (кроме проёмов)
+    for (const [zw, dzw] of [[zA + 0.1 + 0.016, 1], [zB - 0.1 - 0.016, -1]]) {
+      const ops = zw < zc ? opsA : opsB; let cur = xb1;
+      for (const p of ops.slice().sort((a, b) => a.a - b.a)) { if (p.y0 > 0.2) continue; if (p.a > cur) D((cur + p.a) / 2, yy, zw, p.a - cur, 0.1, 0.02, 'wood', 0x3d3228, { tex: 'wood' }); cur = p.b; }
+      if (xb2 > cur) D((cur + xb2) / 2, yy, zw, xb2 - cur, 0.1, 0.02, 'wood', 0x3d3228, { tex: 'wood' });
+    }
+    // перегородки между комнатами
+    for (let k = 1; k < n; k++) {
+      const x = xb1 + k * slot;
+      wallY('z', x, z0 + t / 2, zA - 0.1, 0.15, y, HH, 'plaster', 0xffffff, [], 'wallpaper');
+      wallY('z', x, zB + 0.1, z1 - t / 2, 0.15, y, HH, 'plaster', 0xffffff, [], 'wallpaper');
+    }
+    // торцы коридора
+    paintWall('z', xb1, z0 + t / 2, z1 - t / 2, 0.2, y, HH, [opw(zc - 1.3, zc + 1.3, 0, 2.5)]);
+    paintWall('z', xb2, z0 + t / 2, z1 - t / 2, 0.2, y, HH, [opw(zc - 1.3, zc + 1.3, 0, 2.5)]);
+    // ядра: боковые перегородки с дверями и санузлы/кухня
+    for (const blk of BLK) {
+      const { vx, away } = blk, dx = vx + away * 0.8, L = Math.abs(blk.xe - vx);
+      for (const zz of [zc - 2.4, zc + 2.4]) { paintWall('x', zz, Math.min(vx, blk.xe), Math.max(vx, blk.xe), 0.2, y, HH, [opn(dx, 'door')]); doorFrame('x', zz, dx - 0.75, dx + 0.75, 2.2, 0.2, yy); }
+      const rN = wcRoom(vx, away, zc - 2.5, z0 + t / 2, yy, blk.kindN, L, f), rS = wcRoom(vx, away, zc + 2.5, z1 - t / 2, yy, blk.kindS, L, f);
+      World.rooms.push({ f, kind: blk.kindN, id: blk.kindN, b: o.numOff, door: [dx, zc - 2.4], inn: [dx, zc - 3.5], far: [vx + away * 0.85, zc - 4.6], dropped: rN.dropped });
+      World.rooms.push({ f, kind: blk.kindS, id: blk.kindS, b: o.numOff, door: [dx, zc + 2.4], inn: [dx, zc + 3.5], far: [vx + away * 0.85, zc + 4.6], dropped: rS.dropped });
+      sign('z', 1, dx, y + 2.45, zc - 2.4 + 0.12, blk.kindN === 'wc' ? 'WC' : 'КУХНЯ', 0.5, 0.2, 1);
+      sign('z', -1, dx, y + 2.45, zc + 2.4 - 0.12, blk.kindS === 'wc' ? 'WC' : 'ДУШ', 0.5, 0.2, 1);
+    }
+    // таблички этажа — на стенах коридора у лестниц (раньше висели в проёме)
+    sign('z', -1, xb1 + 1.1, y + 1.95, zB - 0.1 - 0.012, (f + 1) + ' ЭТАЖ', 0.8, 0.24, 2);
+    sign('z', 1, xb2 - 1.1, y + 1.95, zA + 0.1 + 0.012, (f + 1) + ' ЭТАЖ', 0.8, 0.24, 2);
+    sign('z', 1, xb1 + 1.1, y + 1.95, zA + 0.1 + 0.012, (f + 1) + ' ЭТАЖ', 0.8, 0.24, 2);
+    sign('z', -1, xb2 - 1.1, y + 1.95, zB - 0.1 - 0.012, (f + 1) + ' ЭТАЖ', 0.8, 0.24, 2);
+    // комнаты
+    for (const side of ['N', 'S']) for (let k = 0; k < n; k++) {
+      const hall = f === 0 && ((side === 'S' && k === o.hallS) || (side === 'N' && k === o.hallN));
+      const rx0 = xb1 + k * slot + 0.075, rx1 = xb1 + (k + 1) * slot - 0.075;
+      const zd = side === 'N' ? zA - 0.1 : zB + 0.1, zf = side === 'N' ? z0 + t / 2 : z1 - t / 2;
+      const id = (f + 1) * 100 + o.numOff + 2 * k + (side === 'N' ? 1 : 2);
+      srand(9000 + id * 7 + o.numOff);
+      const e = side === ex_side ? escAt(f) : null, isExit = !!(e && Math.abs(e.cx - sc(k)) < slot / 2);
+      const W = rx1 - rx0, Dp = Math.abs(zf - zd), dz = Math.sign(zf - zd);
+      const r = mkRoom(frm(rx0, 1, zd, zf), W, Dp, yy, f);
+      const info = { f, id, kind: hall ? 'hall' : 'room', b: o.numOff, door: [sc(k), zd - dz * 0.1], inn: [sc(k), zd + dz * 1.0], far: [sc(k), zf - dz * 1.0], cx: rx0 + W / 2, cz: (zd + zf) / 2 };
+      if (hall) {
+        hallRoom(r);
+      } else {
+        let style = srnd() < 0.18 ? 1 : srnd() < 0.12 ? 2 : srnd() < 0.1 ? 3 : 0;
+        if (isExit) style = 4;
+        furnishRoom(r, style, isExit ? e.cx - rx0 : undefined);
+        if (isExit) info.far = [e.cx, zf - dz * 1.0];
+        if (style !== 2) World.lights.push({ x: (rx0 + rx1) / 2, y: y + DLH - 0.6, z: (zd + zf) / 2, col: 0xffd9a0, int: 0.42, dist: 7.5 });
+        info.style = style;
+      }
+      info.dropped = r.dropped; World.rooms.push(info);
+      if (!hall) {
+        const sg = side === 'N' ? 1 : -1;
+        sign('z', sg, sc(k) + 1.2, y + 1.85, (side === 'N' ? zA + 0.1 + 0.012 : zB - 0.1 - 0.012), String(id), 0.4, 0.2, 0);
+      }
+    }
+    // свет и лампы в коридоре
+    for (let x = xb1 + 3; x < xb2 - 1; x += 7.5) { World.lights.push({ x, y: y + DLH - 0.55, z: zc, col: f % 2 ? 0xffe2b0 : 0xe8f0ff, int: 0.55, dist: 12 }); lampAt(x, yy + DLH - SLAB - 0.06 - (f === 0 ? 0.03 : 0), zc, true); }
+    World.lights.push({ x: xb1, y: y + DLH - 0.6, z: zc, col: 0xffe2b0, int: 0.4, dist: 8 });
+    // немного хлама у стен коридора: между дверями, глубиной не более 0.55 м, чтобы оставалось 1.3 м прохода
+    srand(7000 + f * 31 + o.numOff);
+    for (let k = 1; k < n; k++) {
+      if (srnd() > 0.4) continue;
+      const xk = xb1 + k * slot, northSide = srnd() < 0.5, zw = northSide ? zA + 0.1 : zB - 0.1, dzw = northSide ? 1 : -1;
+      if (f === 0 && (k === o.hallN || k === o.hallN + 1 || k === o.hallS || k === o.hallS + 1)) continue;
+      const pick = srnd();
+      if (pick < 0.35) B(xk, yy, zw + dzw * 0.28, 1.2, 0.42, 0.45, 'wood', 0x6a5236, { shape: 'bench' });
+      else if (pick < 0.7) { B(xk - 0.3, yy, zw + dzw * 0.35, 0.6, 0.8, 0.6, 'wood', 0xb08a5a, { tex: 'crate' }); if (srnd() < 0.5) B(xk + 0.4, yy, zw + dzw * 0.3, 0.5, 0.5, 0.5, 'wood', 0xa0805a, { tex: 'crate' }); }
+      else B(xk, yy, zw + dzw * 0.22, 1.1, 1.85, 0.4, 'metal', 0x56604f, { shape: 'locker', face: dzw > 0 ? '+z' : '-z' });
+    }
+    // огнетушители у лестниц
+    for (const [xe, ze, dzf] of [[xb1 + 1.9, zA + 0.1 + 0.07, 1], [xb2 - 1.9, zB - 0.1 - 0.07, -1]]) D(xe, yy + 1.0, ze, 0.14, 0.4, 0.12, 'plaster', 0xb0302a, { tex: 'paintw' });
+  }
+  const leftV = xb1, rightV = xb2;
+  stairCore(leftV, -1, zc, F);
+  stairCore(rightV, 1, zc, F);
+  // ---- крыша ----
+  const top = F * DLH;
+  B(cx, top - SLAB, cz, x1 - x0 + 0.7, SLAB + 0.12, z1 - z0 + 0.7, 'roof', 0x5f5e5a, { tex: 'roof' });
+  for (const [px, pz, pw, pd] of [[cx, z0 - 0.3, x1 - x0 + 0.7, 0.2], [cx, z1 + 0.3, x1 - x0 + 0.7, 0.2], [x0 - 0.3, cz, 0.2, z1 - z0], [x1 + 0.3, cz, 0.2, z1 - z0]]) B(px, top + 0.12, pz, pw, 0.55, pd, 'concrete', 0x8c8981);
+  B(cx - 6, top + 0.12, cz + 2, 1.2, 1.4, 1.2, 'brick', 0x8a5a48); B(cx + 9, top + 0.12, cz - 2, 1.2, 1.2, 1.2, 'brick', 0x8a5a48);
+  const bd = { x0, x1, z0, z1, cx, cz, h: top, levels: F, wpPer: 3 };
+  World.buildings.push(bd);
+  // навес и ступени у входов
+  for (const [side, k] of [['S', o.hallS], ['N', o.hallN]]) {
+    if (k < 0) continue;
+    const dz = side === 'S' ? 1 : -1, zz = side === 'S' ? z1 : z0, xc = sc(k);
+    B(xc, 2.75, zz + dz * 1.3, 4.6, 0.14, 2.6, 'concrete', 0x77746c, { tex: 'concrete' });
+    B(xc - 2.1, 0, zz + dz * 2.4, 0.2, 2.75, 0.2, 'metal', 0x4a4d50); B(xc + 2.1, 0, zz + dz * 2.4, 0.2, 2.75, 0.2, 'metal', 0x4a4d50);
+    B(xc, 0, zz + dz * 0.95, 4.2, 0.16, 1.1, 'concrete', 0x8c8981, { tex: 'concrete' });
+    B(xc, 0, zz + dz * 1.8, 4.2, 0.08, 0.7, 'concrete', 0x8c8981, { tex: 'concrete' });
+  }
+  if (o.escape) fireEscape(o.escape.xs, o.escape.dir, o.escape.zFace, o.escape.dz, F);
+  // водосточные трубы
+  for (const [px, pz] of [[x0 - 0.2, z0 - 0.2], [x1 + 0.2, z0 - 0.2], [x0 - 0.2, z1 + 0.2], [x1 + 0.2, z1 + 0.2]]) B(px, 0, pz, 0.14, top, 0.14, 'metal', 0x5a4a3a);
+  return bd;
+}
+
+/* ---------- карта ---------- */
+MAPS.dorms = {
+  name: 'Общага', spawnMin: 40, bound: 96, spawn: [70, 44, 1.04], T: 98, pick: [14, 12], maxWP: 60, env: 'overcast',
+  koth: [[-6, -4], [28, 0], [-52, -4], [30, 34]],
+  gen() {
+    srand(20261016);
+    this.flat.push([-72, 72, -46, 54]);
+    // дороги (гравий)
+    this.roads.push({ x0: -98, x1: 98, z0: 40, z1: 47, tex: 'gravel' }, { x0: 56, x1: 63, z0: -98, z1: 40, tex: 'gravel' }, { x0: -62, x1: -30, z0: 26, z1: 40, tex: 'gravel' });
+    // ---- Общежитие №3 (3 этажа) ----
+    dorm({
+      x0: -40, x1: 16, z0: -34, z1: -18, zc: -26, F: 3, SW: 6, n: 8, hallS: 3, hallN: 5, numOff: 0,
+      ext: { mat: 'plaster', tex: 'plasterY', col: 0xffffff },
+      escape: { xs: -2, dir: -1, zFace: -18 + 0.15, dz: 1, side: 'S' },
+    });
+    // ---- Общежитие №2 (2 этажа) ----
+    dorm({
+      x0: -30, x1: 10, z0: 8, z1: 22, zc: 15, F: 2, SW: 6, n: 5, hallS: 2, hallN: 1, numOff: 20,
+      ext: { mat: 'brick', tex: 'brick', col: 0xcaa896 },
+      escape: { xs: 4, dir: -1, zFace: 8 - 0.15, dz: -1, side: 'N' },
+    });
+    outdoor.call(this);
+  },
+};
+
+function outdoor() {
+  const W = this;
+  const occ = [];
+  const inB = (x, z, m) => W.buildings.some(b => x > b.x0 - m && x < b.x1 + m && z > b.z0 - m && z < b.z1 + m);
+  const onRoad = (x, z, m) => W.roads.some(r => x > r.x0 - m && x < r.x1 + m && z > r.z0 - m && z < r.z1 + m);
+  const spot = (r, area) => {
+    for (let k = 0; k < 60; k++) {
+      const x = srr(area[0], area[1]), z = srr(area[2], area[3]);
+      if (inB(x, z, r + 3) || onRoad(x, z, r + 0.5) || Math.hypot(x - W.spawnPlayer[0], z - W.spawnPlayer[1]) < 8) continue;
+      if (occ.every(o => Math.hypot(o[0] - x, o[1] - z) > o[2] + r)) { occ.push([x, z, r]); return [x, z]; }
+    }
+    return null;
+  };
+  const yard = [-60, 60, -16, 36];
+  // детская площадка
+  const px = 32, pz = -2;
+  occ.push([px, pz, 9]);
+  B(px, 0, pz + 3, 4.2, 0.35, 4.2, 'wood', 0x6a5a40, { tex: 'wood' }); // песочница
+  B(px - 3, 0, pz - 3, 0.12, 2.4, 0.12, 'metal', 0x6a3a2a); B(px - 0.5, 0, pz - 3, 0.12, 2.4, 0.12, 'metal', 0x6a3a2a);
+  B(px - 1.75, 2.3, pz - 3, 2.8, 0.1, 0.1, 'metal', 0x6a3a2a); // качели
+  B(px - 1.2, 0.5, pz - 3, 0.5, 0.06, 0.3, 'wood', 0x7a5a3a, { vis: true });
+  B(px + 4, 0, pz - 2, 0.9, 1.5, 2.6, 'metal', 0x7a3b30, { shape: 'junk' }); // горка
+  B(px + 4, 0, pz + 1, 0.5, 0.7, 0.5, 'metal', 0x4a6a4a);
+  B(px - 6, 0, pz + 2, 1.8, 0.5, 0.4, 'wood', 0x6a5a40, { tex: 'wood' }); // лавка
+  B(px + 7, 0, pz + 4, 1.8, 0.5, 0.4, 'wood', 0x6a5a40, { tex: 'wood' });
+  // машины-развалюхи
+  const rust = [0x7a4a30, 0x6a4a3a, 0x56595a, 0x4f6a50, 0x8a7a5a];
+  const carsAt = [[-18, 31, false], [-8, 31.5, false], [24, 30, false], [44, 28, true], [-52, 18, true], [66, 20, true], [-62, -8, true], [20, -50, false]];
+  carsAt.forEach((c, i) => { if (!inB(c[0], c[1], 3)) { car(c[0], c[1], c[2], rust[i % rust.length]); occ.push([c[0], c[1], 3]); } });
+  // мусор и контейнеры
+  const dump = (x, z, r) => {
+    if (inB(x, z, 3)) return;
+    B(x, 0, z, 2.0, 1.2, 1.1, 'metal', 0x3f5a46, { tex: 'container' }); occ.push([x, z, 2]);
+    for (let i = 0; i < 6; i++) { const s = srr(0.4, 0.9); B(x + srr(-r, r), 0, z + srr(-r, r) + 1.6, s * 1.3, srr(0.2, 0.5), s, 'wood', [0x5a4a3a, 0x3a3a38, 0x6b5f4a][i % 3], { shape: 'junk' }); }
+  };
+  dump(-46, -14, 1.4); dump(24, -14, 1.2); dump(-40, 4, 1.2); dump(14, 28, 1.2);
+  // бочки, ящики, покрышки, стройматериалы
+  for (let i = 0; i < 22; i++) { const p = spot(1, yard); if (p) { const s = srnd(); if (s < 0.4) { B(p[0], 0, p[1], 0.62, 0.95, 0.62, 'metal', 0x44603f, { shape: 'cyl' }); } else if (s < 0.75) crate(p[0], p[1], 0, 1.1); else B(p[0], 0, p[1], 1.3, 0.6, 1.3, 'concrete', 0x3a3a3a, { shape: 'rock' }); } }
+  for (let i = 0; i < 8; i++) { const p = spot(2, [-70, 70, -44, 52]); if (p) barrier(p[0], p[1], srnd() < 0.5); }
+  // поленницы и штабеля
+  for (const [x, z] of [[-36, -40], [-46, 12]]) if (!inB(x, z, 3)) { B(x, 0, z, 3, 1.1, 1.0, 'wood', 0x7a5a3a, { tex: 'wood' }); occ.push([x, z, 2]); }
+  // забор по периметру двора (бетонные плиты и сетка)
+  const fenceCol = 0x9a978d;
+  for (let x = -60; x < 62; x += 3.1) { if (x > 4 && x < 14) continue; B(x + 1.5, 0, -46, 3, 2.4, 0.18, 'concrete', fenceCol, { tex: 'concrete' }); }
+  for (let z = -46; z < 36; z += 3.1) { if (z > -12 && z < -4) continue; B(-62, 0, z + 1.5, 0.18, 2.4, 3, 'concrete', fenceCol, { tex: 'concrete' }); }
+  for (let z = -46; z < 36; z += 3.1) { if (z > 6 && z < 14) continue; B(62, 0, z + 1.5, 0.18, 2.4, 3, 'concrete', fenceCol, { tex: 'concrete' }); }
+  // деревья: двор и лес
+  const T = (x, z, s, low) => tree(x, z, s, low);
+  for (let i = 0; i < 26; i++) { const p = spot(1.2, [-58, 58, -42, 38]); if (p) T(p[0], p[1], srr(0.9, 1.5)); }
+  for (let i = 0; i < 520; i++) {
+    const x = srr(-95, 95), z = srr(-95, 95);
+    if (x > -66 && x < 66 && z > -50 && z < 56) continue;
+    if (onRoad(x, z, 3.5)) continue;
+    if (Math.hypot(x - W.spawnPlayer[0], z - W.spawnPlayer[1]) < 8) continue;
+    T(x, z, srr(1.0, 1.8), Math.max(Math.abs(x) - 66, z - 56, -50 - z) > 18);
+  }
+  // граница карты (невидимая стена)
+  const E = W.T;
+  B(0, 0, -E, 2 * E + 4, 6, 1, 'concrete', 0x8c897f, { vis: false }); B(0, 0, E, 2 * E + 4, 6, 1, 'concrete', 0x8c897f, { vis: false });
+  B(-E, 0, 0, 1, 6, 2 * E + 4, 'concrete', 0x8c897f, { vis: false }); B(E, 0, 0, 1, 6, 2 * E + 4, 'concrete', 0x8c897f, { vis: false });
+  // подсказки для путевых точек: коридоры и дворы
+  for (let f = 0; f < 3; f++) for (let x = -34; x <= 10; x += 11) W.hintWP.push([x, -26, f * DLH]);
+  for (let f = 0; f < 2; f++) for (let x = -24; x <= 4; x += 9) W.hintWP.push([x, 15, f * DLH]);
+  W.hintWP.push([-6, -4, 0], [28, 0, 0], [-52, -4, 0], [30, 34, 0], [-20, 6, 0], [20, 14, 0]);
+}
 
 /* --- 20_ballistics.js --- */
 /* ===== Патроны, оружие, внешняя баллистика ===== */
@@ -890,6 +1535,25 @@ function dropAt(cart, dist) { const t = flightTime(cart, dist); return 0.5 * G *
 
 if (typeof module !== 'undefined') module.exports = { CART, WEAPONS, Ballistics, rayCapsule, flightTime, dropAt, dragMul };
 
+/* --- 29_gait.js --- */
+/* Походка из клипов Mixamo Walk/Run (Soldier.glb из примеров three.js): форма траектории ноги, подъём, наклон стопы, качание таза.
+   Фаза u=0 — середина маха левой ноги. */
+const GAIT = {"walk":{"dur":1.033,"A":0.4567,"lift":0.1702,"hipH":0.997,"z":[-0.0,0.122,0.243,0.363,0.483,0.601,0.717,0.833,0.937,0.997,0.976,0.902,0.78,0.633,0.471,0.29,0.085,-0.145,-0.398,-0.642,-0.843,-0.968,-0.999,-0.96,-0.893,-0.814,-0.7,-0.578,-0.462,-0.349,-0.236,-0.12],"y":[0.006,0.006,0.007,0.011,0.025,0.044,0.072,0.129,0.229,0.356,0.483,0.704,0.903,0.996,0.956,0.82,0.621,0.411,0.238,0.242,0.322,0.389,0.351,0.234,0.116,0.032,0.001,0.005,0.007,0.008,0.007,0.007],"p":[-0.0,-0.0,-0.0,0.003,0.015,0.033,0.062,0.13,0.266,0.504,0.777,0.629,0.561,0.651,0.791,0.785,0.556,0.303,0.049,-0.184,-0.419,-0.615,-0.635,-0.475,-0.252,-0.061,-0.003,0.0,0.0,0.0,0.0,-0.0],"b":[0.0125,0.0219,0.0263,0.0262,0.0218,0.0138,0.0039,-0.0087,-0.0192,-0.0274,-0.033,-0.0324,-0.0261,-0.0139,0.0024,0.0201,0.0363,0.0466,0.0493,0.042,0.0273,0.0102,-0.004,-0.0143,-0.0194,-0.0242,-0.0305,-0.0347,-0.0337,-0.026,-0.0133,0.0002],"s":[-0.0261,-0.0233,-0.0207,-0.0177,-0.0142,-0.0106,-0.0064,-0.0006,0.0063,0.0133,0.0202,0.0268,0.0314,0.0322,0.0294,0.0251,0.0209,0.0194,0.0176,0.0154,0.0133,0.0108,0.0075,0.0031,-0.0032,-0.0105,-0.0173,-0.0233,-0.0281,-0.0308,-0.031,-0.029]},"run":{"dur":0.7,"A":0.4748,"lift":0.4243,"hipH":0.9537,"z":[0.0,0.214,0.427,0.608,0.749,0.839,0.905,0.962,0.993,0.971,0.896,0.814,0.728,0.633,0.512,0.381,0.254,0.138,0.02,-0.115,-0.266,-0.427,-0.587,-0.747,-0.887,-0.977,-0.964,-0.888,-0.781,-0.62,-0.425,-0.215],"y":[0.001,0.002,0.002,0.035,0.101,0.176,0.27,0.386,0.513,0.64,0.769,0.872,0.941,0.987,0.996,0.983,0.961,0.898,0.816,0.733,0.643,0.558,0.487,0.408,0.331,0.254,0.177,0.103,0.047,0.013,0.003,0.004],"p":[-0.0,0.0,0.003,0.107,0.318,0.629,0.804,0.752,0.602,0.449,0.299,0.176,0.079,0.006,0.007,0.091,0.246,0.482,0.692,0.663,0.443,0.183,-0.07,-0.275,-0.44,-0.57,-0.601,-0.507,-0.241,-0.066,-0.011,0.0],"b":[-0.0551,-0.0535,-0.0419,-0.0232,-0.0022,0.0161,0.03,0.0404,0.0457,0.0459,0.0422,0.0324,0.0169,-0.0026,-0.0215,-0.0366,-0.0474,-0.0466,-0.0369,-0.021,-0.0044,0.0111,0.0259,0.0354,0.0404,0.0416,0.0355,0.0231,0.0044,-0.0146,-0.0318,-0.0477],"s":[0.0085,0.0129,0.0136,0.0121,0.01,0.0068,0.0047,0.0043,0.0056,0.007,0.0076,0.0068,0.0043,0.0003,-0.0029,-0.0053,-0.0077,-0.0093,-0.0099,-0.0094,-0.0082,-0.007,-0.0063,-0.0059,-0.0055,-0.0054,-0.0057,-0.0062,-0.0061,-0.0048,-0.002,0.0029]}};
+function gaitSamp(a, u) { const n = a.length, x = (u - Math.floor(u)) * n, i = Math.floor(x) % n, f = x - Math.floor(x); return a[i] + (a[(i + 1) % n] - a[i]) * f; }
+// нога: смещение вперёд (м, в амплитуде шага), подъём (м), наклон стопы (рад, + носок вниз)
+function gaitFoot(ph, speed, hurt) {
+  const u = ph / (Math.PI * 2), w = sm01((speed - 3.2) / 1.8), W = GAIT.walk, Rn = GAIT.run;
+  const fade = sm01((speed - 0.4) / 0.9);
+  const z = lerp(gaitSamp(W.z, u), gaitSamp(Rn.z, u), w), y = lerp(gaitSamp(W.y, u), gaitSamp(Rn.y, u), w), p = lerp(gaitSamp(W.p, u), gaitSamp(Rn.p, u), w);
+  const lift = lerp(W.lift, Rn.lift, w) * 0.88 * (0.7 + 0.3 * w) * (0.3 + 0.7 * fade) * (hurt ? 0.5 : 1);
+  return { off: z * 0.36 * fade * (hurt ? 0.7 : 1), ly: y * lift, pitch: p * 0.8 * fade };
+}
+// таз: подъём и качание в сторону (м), фаза привязана к левой ноге (gait + π)
+function gaitBody(gait, speed) {
+  const u = (gait + Math.PI) / (Math.PI * 2), w = sm01((speed - 3.2) / 1.8), W = GAIT.walk, Rn = GAIT.run, fade = sm01((speed - 0.4) / 0.9), k = 0.88 * 0.6 * fade;
+  return { bob: lerp(gaitSamp(W.b, u), gaitSamp(Rn.b, u), w) * k, sway: lerp(gaitSamp(W.s, u), gaitSamp(Rn.s, u), w) * k };
+}
+
 /* --- 30_combat.js --- */
 /* ===== Бойцы: тело, урон по частям, статусы, оружие, скелет ===== */
 const PARTS = ['head', 'thorax', 'stomach', 'lArm', 'rArm', 'lLeg', 'rLeg'];
@@ -1026,20 +1690,20 @@ function makeRig(p, c) {
   const [ER, hR] = ik2(rig.SR, p.tR, ARM1, ARM2, p.polR);
   const [EL, hL] = ik2(rig.SL, p.tL, ARM1, ARM2, p.polL);
   rig.ER = ER; rig.hR = hR; rig.EL = EL; rig.hL = hL;
-  const hipUp = p.lying ? 0 : -0.04;
-  rig.HR = V.add(V.mad(p.P, p.pr, 0.095), V.mul([0, 1, 0], hipUp));
-  rig.HL = V.add(V.mad(p.P, p.pr, -0.095), V.mul([0, 1, 0], hipUp));
+  const gb = p.lying ? null : gaitBody(c.gait, c.speed), hipUp = p.lying ? 0 : -0.04 + gb.bob, hs = gb ? -gb.sway : 0;
+  rig.HR = V.add(V.mad(p.P, p.pr, 0.095 + hs), V.mul([0, 1, 0], hipUp));
+  rig.HL = V.add(V.mad(p.P, p.pr, -0.095 + hs), V.mul([0, 1, 0], hipUp));
   let fR, fL;
   if (p.fR) { fR = p.fR; fL = p.fL; }
   else {
     const R = p.R, F = p.F;
-    const sp = c.speed, stride = clamp(sp * 0.075, 0, 0.42), lift = clamp(0.02 + sp * 0.026, 0, 0.2);
+    const sp = c.speed;
     const mx = c.lmx, mz = c.lmz;
     const foot = (side, ph, hurt) => {
-      const off = Math.sin(ph) * stride * (hurt ? 0.7 : 1), ly = Math.max(0, Math.cos(ph)) * lift * (hurt ? 0.5 : 1);
+      const gf = gaitFoot(ph, sp, hurt), off = gf.off, ly = gf.ly;
       const fx = c.x + R[0] * (0.11 * side + mx * off) + F[0] * mz * off, fz = c.z + R[2] * (0.11 * side + mx * off) + F[2] * mz * off;
       const onT = c.y <= World.H(c.x, c.z) + 0.3, fy = onT ? Math.max(World.H(fx, fz), c.y - 0.35) : c.y;
-      return [fx, fy + 0.08 + ly, fz];
+      return [fx, fy + 0.08 + ly, fz, gf.pitch];
     };
     fR = foot(1, c.gait, c.parts.rLeg.black); fL = foot(-1, c.gait + Math.PI, c.parts.lLeg.black);
   }
@@ -1048,6 +1712,7 @@ function makeRig(p, c) {
   const [KR, aR] = ik2(rig.HR, fR, LEG1, LEG2, kpR);
   const [KL, aL] = ik2(rig.HL, fL, LEG1, LEG2, kpL);
   rig.KR = KR; rig.aR = aR; rig.KL = KL; rig.aL = aL;
+  rig.fpR = fR[3] || 0; rig.fpL = fL[3] || 0;
   rig.lying = !!p.lying;
   const cap = (part, a, b, r) => rig.caps.push({ part, a, b, r });
   cap('head', V.mad(p.H, p.hu, -0.02), V.mad(p.H, p.hu, 0.06), 0.118);
@@ -1065,7 +1730,7 @@ let _cid = 0;
 class Combatant {
   constructor(o) {
     this.id = ++_cid; this.name = o.name || 'Боец'; this.team = o.team; this.isPlayer = !!o.isPlayer;
-    this.x = o.x; this.y = World.H(o.x, o.z); this.z = o.z; this.vx = 0; this.vy = 0; this.vz = 0;
+    this.x = o.x; this.y = o.y === undefined ? World.H(o.x, o.z) : o.y; this.z = o.z; this.vx = 0; this.vy = 0; this.vz = 0;
     this.yaw = o.yaw || 0; this.pitch = 0; this.leanA = 0; this.crouch = 0; this.h = 1.8;
     this.grounded = true; this.speed = 0; this.lmx = 0; this.lmz = 0; this.gait = 0; this.stepD = 0;
     this.stamina = 100; this.canSprint = true; this.sprinting = false; this.ads = 0; this.adsIn = false;
@@ -1686,10 +2351,10 @@ class Brain {
     for (const e of Game.combatants) if (e !== c && e.alive && e.team !== c.team) out.push(e);
     return out;
   }
-  hear(x, z, dist, kind) {
+  hear(x, z, dist, kind, y) {
     if (this.targetVisible) return;
     const err = dist * 0.05;
-    this.heard = { x: x + rnd(-err, err), z: z + rnd(-err, err), t: Game.time, kind };
+    this.heard = { x: x + rnd(-err, err), z: z + rnd(-err, err), y: y === undefined ? this.c.y : y, t: Game.time, kind };
   }
   perceive(dt) {
     const c = this.c, now = Game.time;
@@ -1715,16 +2380,16 @@ class Brain {
     }
     if (best) {
       if (this.target !== best || !this.targetVisible) this.acqT = now;
-      this.target = best; this.targetVisible = true; this.lastSeenPos = [best.x, best.z]; this.lastSeenT = now;
+      this.target = best; this.targetVisible = true; this.lastSeenPos = [best.x, best.z, best.y]; this.lastSeenT = now;
     } else {
       this.targetVisible = false;
       if (c.lastHitBy && c.lastHitBy.alive && c.lastHitBy.team !== c.team && now - c.lastHitT < 1.5 && !this.target) {
-        this.target = c.lastHitBy; this.lastSeenPos = [this.target.x, this.target.z]; this.lastSeenT = now - 0.5;
+        this.target = c.lastHitBy; this.lastSeenPos = [this.target.x, this.target.z, this.target.y]; this.lastSeenT = now - 0.5;
       }
     }
     if (this.target && !this.target.alive) { this.target = null; this.targetVisible = false; }
     if (this.target && now - this.lastSeenT > 14) this.target = null;
-    if (c.lastShotAt && now - c.lastShotT < 1 && !this.target && !this.heard) this.heard = { x: c.lastShotAt[0], z: c.lastShotAt[1], t: now, kind: 'fire' };
+    if (c.lastShotAt && now - c.lastShotT < 1 && !this.target && !this.heard) this.heard = { x: c.lastShotAt[0], z: c.lastShotAt[1], y: c.y, t: now, kind: 'fire' };
   }
   think(dt) {
     const c = this.c; if (!c.alive || !c.rig) return;
@@ -1803,13 +2468,13 @@ class Brain {
       case 'cover': this.doCover(dt, tgt); break;
       case 'search': {
         const lp = this.lastSeenPos;
-        if (lp) { this.go(lp[0], lp[1], dt, this.sprintOK && this.d.skill > 0.5 && now - this.lastSeenT > 3); if (this.arrived(lp[0], lp[1], 2.5)) { this.lastSeenPos = null; this.state = 'patrol'; } }
+        if (lp) { this.go(lp[0], lp[1], dt, this.sprintOK && this.d.skill > 0.5 && now - this.lastSeenT > 3, lp[2]); if (this.arrived(lp[0], lp[1], 2.5, lp[2])) { this.lastSeenPos = null; this.state = 'patrol'; } }
         else this.state = 'patrol';
         break;
       }
       case 'investigate': {
         const h = this.heard;
-        if (h) { this.go(h.x, h.z, dt, false); if (this.arrived(h.x, h.z, 3)) { this.heard = null; this.state = 'patrol'; } }
+        if (h) { this.go(h.x, h.z, dt, false, h.y); if (this.arrived(h.x, h.z, 3, h.y)) { this.heard = null; this.state = 'patrol'; } }
         else this.state = 'patrol';
         break;
       }
@@ -1825,16 +2490,31 @@ class Brain {
     }
   }
   /* --- движение --- */
-  arrived(x, z, r) { return Math.hypot(this.c.x - x, this.c.z - z) < r; }
-  go(x, z, dt, sprint) {
-    const c = this.c, I = c.in;
+  arrived(x, z, r, y) { return Math.hypot(this.c.x - x, this.c.z - z) < r && (y === undefined || Math.abs(this.c.y - y) < 1.6); }
+  go(x, z, dt, sprint, y) {
+    const c = this.c, I = c.in, now = Game.time;
+    if (y === undefined) y = c.y;
     this.pathAge += dt;
-    if (!this.goal || Math.hypot(this.goal[0] - x, this.goal[1] - z) > 2.5 || !this.path || this.pathAge > 3.5) {
-      this.goal = [x, z]; this.pathAge = 0; this.pi = 0;
-      this.path = World.findPath(c.x, c.z, x, z) || null;
+    const gy = this.goal && this.goal[2] !== undefined ? this.goal[2] : y;
+    const moved = !this.goal || Math.hypot(this.goal[0] - x, this.goal[1] - z) > 3.5 || Math.abs(gy - y) > 1.2;
+    if ((moved || !this.path || this.pathAge > (this.partial ? 1.5 : 5)) && now >= (this.pathFailT || 0) && (this.pathAge > 0.5 || !this.path) && World.pathSpent < 6) {
+      this.goal = [x, z, y]; this.pathAge = 0; this.pi = 0;
+      const t0 = World.clock();
+      this.path = World.findPath(c.x, c.z, x, z, 0, c.y, y) || null; this.partial = !!(this.path && World.partial);
+      World.pathSpent += World.clock() - t0 + 0.2;
+      if (!this.path) this.pathFailT = now + 0.7 + Math.random() * 0.7;
     }
-    if (!this.path) { this.faceHeading(dt, 3); return; }
-    while (this.pi < this.path.length - 1 && Math.hypot(c.x - this.path[this.pi][0], c.z - this.path[this.pi][1]) < 0.9) this.pi++;
+    if (!this.path) {
+      // пути нет (или очередь на расчёт): при неудаче идём напрямую, иначе ждём
+      if (this.pathFailT > now) {
+        const dx = x - c.x, dz = z - c.z, d = Math.hypot(dx, dz) || 1;
+        if (!(this.target && this.targetVisible)) this.turnTo(Math.atan2(-dx, -dz), 6, dt);
+        const R = [Math.cos(c.yaw), -Math.sin(c.yaw)], F = [-Math.sin(c.yaw), -Math.cos(c.yaw)];
+        I.mx = clamp(dx / d * R[0] + dz / d * R[1], -1, 1); I.mz = clamp(dx / d * F[0] + dz / d * F[1], -1, 1);
+      } else this.faceHeading(dt, 3);
+      return;
+    }
+    while (this.pi < this.path.length - 1 && Math.hypot(c.x - this.path[this.pi][0], c.z - this.path[this.pi][1]) < 0.9 && Math.abs(c.y - this.path[this.pi][2]) < 1.1) this.pi++;
     const wp = this.path[this.pi];
     const dx = wp[0] - c.x, dz = wp[1] - c.z, d = Math.hypot(dx, dz);
     if (d < 0.5 && this.pi >= this.path.length - 1) return;
@@ -1859,15 +2539,34 @@ class Brain {
     }
     if (!this.goal) this.pickWaypoint();
     if (this.goal) {
-      this.go(this.goal[0], this.goal[1], dt, false);
-      if (this.arrived(this.goal[0], this.goal[1], 2.2)) { this.goal = null; this.path = null; this.wait = rnd(1.5, 4.5); this.patrolYaw = c.yaw + rnd(-1.5, 1.5); }
+      this.go(this.goal[0], this.goal[1], dt, false, this.goal[2]);
+      if (this.arrived(this.goal[0], this.goal[1], 2.2, this.goal[2])) { this.goal = null; this.path = null; this.wait = rnd(1.5, 4.5); this.patrolYaw = c.yaw + rnd(-1.5, 1.5); }
     }
+  }
+  // точка внутри ближайшего/случайного здания (укрытие)
+  bldgPoint(near, maxD, tgt) {
+    const c = this.c, bs = World.buildings.filter(b => !b.ruin && (b.x1 - b.x0) > 5);
+    if (!bs.length) return null;
+    let list = bs;
+    if (near) { list = bs.filter(b => Math.hypot(b.cx - c.x, b.cz - c.z) < maxD); if (!list.length) return null; }
+    for (let k = 0; k < 8; k++) {
+      const b = pick(list), H = Math.max(b.h || 3, 3), fl = Math.max(1, Math.round(H / 3));
+      const x = rnd(b.x0 + 1, b.x1 - 1), z = rnd(b.z0 + 1, b.z1 - 1), y = Math.min(fl - 1, rndi(0, fl - 1)) * 3;
+      const nd = World.surfAt(x, z, y, 1.4);
+      if (nd < 0 || !World.reach[nd]) continue;
+      const fy = World.sY[nd];
+      if (tgt && World.los([x, fy + 1.35, z], tgt.rig.H)) continue;
+      return [x, z, fy];
+    }
+    return null;
   }
   pickWaypoint() {
     const c = this.c;
+    if (this.campy === undefined) this.campy = Math.random() < 0.6;
+    if (this.campy && Math.random() < 0.55) { const p = this.bldgPoint(false, 0, null); if (p && Math.hypot(p[0] - c.x, p[1] - c.z) > 8) { this.goal = p; this.path = null; return; } }
     for (let k = 0; k < 6; k++) {
       const w = pick(World.waypoints);
-      if (Math.hypot(w[0] - c.x, w[1] - c.z) > 15) { this.goal = [w[0], w[1]]; this.path = null; return; }
+      if (Math.hypot(w[0] - c.x, w[1] - c.z) + Math.abs(w[2] - c.y) * 3 > 15) { this.goal = [w[0], w[1], w[2]]; this.path = null; return; }
     }
     this.goal = null;
   }
@@ -1878,18 +2577,27 @@ class Brain {
     for (let i = 0; i < 22; i++) {
       const a = Math.random() * Math.PI * 2, r = rnd(3, 13);
       const x = c.x + Math.cos(a) * r, z = c.z + Math.sin(a) * r;
-      if (!World.isFree(x, z) || !World.reach[World.cellOf(z) * World.nn + World.cellOf(x)]) continue;
-      if (World.los([x, 1.35, z], th)) continue;
+      const nd = World.surfAt(x, z, c.y, 0.6);
+      if (nd < 0 || !World.reach[nd]) continue;
+      const fy = World.sY[nd];
+      if (World.los([x, fy + 1.35, z], th)) continue;
       const s = r + Math.hypot(x - tgt.x, z - tgt.z) < 12 ? 20 : 0;
-      const sc = r + s + (World.los([x, 0.9, z], th) ? 4 : 0);
-      if (sc < bs) { bs = sc; best = [x, z]; }
+      const sc = r + s + (World.los([x, fy + 0.9, z], th) ? 4 : 0);
+      if (sc < bs) { bs = sc; best = [x, z, fy]; }
+    }
+    // здания как выгодное укрытие
+    for (let k = 0; k < 3; k++) {
+      const p = this.bldgPoint(true, 40, tgt); if (!p) break;
+      const d = Math.hypot(p[0] - c.x, p[1] - c.z);
+      const sc = d * 0.6 - 6 + (Math.hypot(p[0] - tgt.x, p[1] - tgt.z) < 10 ? 20 : 0);
+      if (sc < bs) { bs = sc; best = p; }
     }
     return best;
   }
   doCover(dt, tgt) {
     const c = this.c, I = c.in;
     if (this.coverPos) {
-      if (!this.arrived(this.coverPos[0], this.coverPos[1], 0.8)) this.go(this.coverPos[0], this.coverPos[1], dt, true);
+      if (!this.arrived(this.coverPos[0], this.coverPos[1], 0.8, this.coverPos[2])) this.go(this.coverPos[0], this.coverPos[1], dt, true, this.coverPos[2]);
       else { I.crouch = true; if (tgt) this.turnTo(Math.atan2(-(tgt.x - c.x), -(tgt.z - c.z)), 3, dt); }
     }
     if (c.reloadT < 0 && c.weapon.mag < c.weapon.def.mag * 0.5 && c.ammoReserve() > 0) I.reload = true;
@@ -1941,7 +2649,7 @@ class Brain {
       this.crouchT -= dt;
       if (dist > pref * 1.6 && !this.arrived(tgt.x, tgt.z, 6)) {
         // сближение короткими рывками, не бегом под огнём
-        this.go(tgt.x, tgt.z, dt, false);
+        this.go(tgt.x, tgt.z, dt, false, tgt.y);
         I.ads = false;
       } else {
         I.mx = this.strafe * (0.6 + 0.4 * this.d.skill) * (c.legFactor() > 0.6 ? 1 : 0.4);
@@ -1953,7 +2661,7 @@ class Brain {
     } else {
       // цель потеряна — идём к последней точке контакта, держа оружие наготове
       const lp = this.lastSeenPos;
-      if (lp) { this.go(lp[0], lp[1], dt, false); const d2 = Math.hypot(lp[0] - c.x, lp[1] - c.z); if (d2 < 3) { this.lastSeenPos = null; } }
+      if (lp) { this.go(lp[0], lp[1], dt, false, lp[2]); const d2 = Math.hypot(lp[0] - c.x, lp[1] - c.z); if (d2 < 3 && Math.abs((lp[2] === undefined ? c.y : lp[2]) - c.y) < 1.6) { this.lastSeenPos = null; } }
       I.ads = false;
     }
   }
@@ -1963,7 +2671,7 @@ function spawnBots(n, diffI, armor) {
   const d = DIFFS[clamp(diffI, 0, 3)];
   const used = [];
   const pl = Game.player;
-  const pool = World.botSpawns.filter(p => Math.hypot(p[0] - pl.x, p[1] - pl.z) > 55);
+  const pool = World.botSpawns.filter(p => Math.hypot(p[0] - pl.x, p[1] - pl.z) > (World.spawnMin || 55));
   for (let i = 0; i < n; i++) {
     let p = null;
     for (let k = 0; k < 40; k++) {
@@ -1973,7 +2681,7 @@ function spawnBots(n, diffI, armor) {
     if (!p) p = pick(pool);
     used.push(p);
     const b = new Combatant({
-      name: CALLSIGNS[i % CALLSIGNS.length], team: Game.mode === 'ffa' ? 10 + i : 1, x: p[0], z: p[1], yaw: rnd(0, Math.PI * 2),
+      name: CALLSIGNS[i % CALLSIGNS.length], team: Game.mode === 'ffa' ? 10 + i : 1, x: p[0], z: p[1], y: p[2], yaw: rnd(0, Math.PI * 2),
       primary: Math.random() < 0.5 ? 'm4' : 'akm', armor, mags: 3 + rndi(0, 2), inv: { bandage: 2, tourniquet: 1, splint: 1, pills: 1, medPool: 140, frag: Math.random() < 0.6 ? 1 : 0, flash: Math.random() < 0.4 ? 1 : 0 },
     });
     b.brain = new Brain(b, { ...d, skill: clamp(d.skill + rnd(-0.08, 0.08), 0.2, 1), react: d.react * rnd(0.85, 1.2) });
@@ -1987,7 +2695,7 @@ Bus.on('shot', e => {
   for (const b of Game.combatants) {
     if (!b.brain || !b.alive || b === s || b.team === s.team) continue;
     const d = Math.hypot(b.x - s.x, b.z - s.z), range = 330 * e.def.loud;
-    if (d < range) b.brain.hear(s.x, s.z, d, 'shot');
+    if (d < range) b.brain.hear(s.x, s.z, d, 'shot', s.y);
   }
 });
 Bus.on('step', e => {
@@ -1995,7 +2703,7 @@ Bus.on('step', e => {
   for (const b of Game.combatants) {
     if (!b.brain || !b.alive || b === s || b.team === s.team) continue;
     const d = Math.hypot(b.x - s.x, b.z - s.z);
-    if (d < 24 * e.loud && d > 0.5) b.brain.hear(s.x, s.z, d, 'step');
+    if (d < 24 * e.loud && d > 0.5) b.brain.hear(s.x, s.z, d, 'step', s.y);
   }
 });
 
@@ -2012,7 +2720,7 @@ Game.reset = function (o) {
   for (const p of World.pickups) p.taken = false;
   const sp = World.spawnPlayer;
   const pl = new Combatant({
-    name: 'Вы', team: 0, isPlayer: true, x: sp[0], z: sp[1], yaw: 0, primary: o.primary || 'm4', armor: this.armor, mags: 5,
+    name: 'Вы', team: 0, isPlayer: true, x: sp[0], z: sp[1], yaw: sp[3] || 0, primary: o.primary || 'm4', armor: this.armor, mags: 5,
     inv: { bandage: 4, tourniquet: 2, splint: 2, pills: 2, medPool: 260, frag: 2, flash: 1 },
   });
   pl.weapons[1].reserve = [17, 17, 17];
@@ -2033,6 +2741,7 @@ Game.alive = function () { return this.combatants.filter(c => c.alive && !c.isPl
 Game.update = function (dt) {
   dt = Math.min(dt, 0.05);
   this.time += dt;
+  World.pathSpent = 0;
   for (const c of this.combatants) if (c.brain) c.brain.think(dt);
   for (const c of this.combatants) c.update(dt);
   // мягкое расталкивание бойцов
@@ -2060,7 +2769,7 @@ Game.update = function (dt) {
 Game.nearestPickup = function (c, maxD) {
   let best = null, bd = maxD || 2.2;
   for (const p of World.pickups) {
-    if (p.taken) continue;
+    if (p.taken || Math.abs((p.y || 0) - c.y) > 1.8) continue;
     const d = Math.hypot(p.x - c.x, p.z - c.z);
     if (d < bd) { bd = d; best = p; }
   }
@@ -2203,7 +2912,7 @@ const SV = {
     const mode = this.M.mode, sp = this.pickSpawn(sl.team, mode.team && !mode.coop);
     const yaw = Math.atan2(sp[0], sp[1]);
     const inv = sl.human ? { bandage: 3, tourniquet: 2, splint: 1, pills: 1, medPool: 220, frag: 2, flash: 1 } : { bandage: 2, tourniquet: 1, splint: 1, pills: 1, medPool: 140, frag: Math.random() < 0.6 ? 1 : 0, flash: Math.random() < 0.4 ? 1 : 0 };
-    const c = new Combatant({ name: sl.name, team: sl.team, x: sp[0], z: sp[1], yaw, primary: sl.human ? sl.pri : (Math.random() < 0.5 ? 'm4' : 'akm'), armor: this.cfg.armor, mags: sl.human ? 5 : 3 + rndi(0, 2), inv });
+    const c = new Combatant({ name: sl.name, team: sl.team, x: sp[0], z: sp[1], y: sp[2], yaw, primary: sl.human ? sl.pri : (Math.random() < 0.5 ? 'm4' : 'akm'), armor: this.cfg.armor, mags: sl.human ? 5 : 3 + rndi(0, 2), inv });
     c.slot = sl; sl.c = c;
     if (sl.human) { c.isHuman = true; c.netMode = 'human'; c.pid = sl.pid; c.protT = 2.5; c.weapons[1].reserve = [17, 17, 17]; c.protT = 2.5; }
     else {
@@ -2211,7 +2920,7 @@ const SV = {
       c.brain = new Brain(c, { ...d, skill: clamp(d.skill + rnd(-0.08, 0.08), 0.2, 1), react: d.react * rnd(0.85, 1.2) }); c.protT = 1.5;
     }
     c.hist = []; Game.combatants.push(c);
-    this.bcast({ t: 'ent', add: [Object.assign(NET.info(c), { st: NET.pack(c) })] });
+    this.bcast({ t: 'ent', add: [Object.assign(NET.info(c), { st: NET.pack(c) })] }, sl.human ? sl : undefined);
     return c;
   },
   removeEntity(c) {
@@ -2228,7 +2937,7 @@ const SV = {
     if (M.mode.coop && M.phase === 'live' && !first) { sl.respT = -1; return; }
     const c = this.makeEntity(sl);
     sl.respT = 0;
-    if (sl.human) this.send(sl, { t: 'spawn', e: c.id, x: c.x, z: c.z, yaw: c.yaw, pri: sl.pri, team: sl.team, inv: c.inv });
+    if (sl.human) this.send(sl, { t: 'spawn', e: c.id, x: c.x, y: c.y, z: c.z, yaw: c.yaw, pri: sl.pri, team: sl.team, inv: c.inv });
   },
   /* ---------- матч ---------- */
   startMatch(modeId) {
@@ -2290,7 +2999,7 @@ const SV = {
   },
   // координаты точки для удержания
   kothInit() {
-    const M = this.M, W = World.waypoints, targets = [[-4, 7], [38, 18], [-50, -8], [20, -60]];
+    const M = this.M, W = World.waypoints, targets = World.koth;
     M.koth = { spots: targets.map(t => { let b = W[0], bd = 1e9; for (const w of W) { const d = Math.hypot(w[0] - t[0], w[1] - t[1]); if (d < bd) { bd = d; b = w; } } return [b[0], b[1]]; }), i: 0, owner: -1, prog: 0, mv: 100, r: 10 };
   },
   /* ---------- волны (кооп) ---------- */
@@ -2456,7 +3165,7 @@ const SV = {
       }
       case 'melee': if (c && c.alive && c.mT < 0) { c.mT = 0; c.mKind = m.kind === 'stab' ? 'stab' : 'slash'; c.protT = 0; } break;
       case 'pk': {
-        const p = World.pickups[m.i | 0]; if (!c || !c.alive || !p || p.taken || Math.hypot(p.x - c.x, p.z - c.z) > 3.2) return;
+        const p = World.pickups[m.i | 0]; if (!c || !c.alive || !p || p.taken || Math.hypot(p.x - c.x, p.z - c.z) > 3.2 || Math.abs((p.y || 0) - c.y) > 1.8) return;
         const got = this.rollLoot(c, p); p.taken = true; p.respT = 70;
         this.bcast({ t: 'pk', i: m.i | 0, taken: true });
         this.send(sl, { t: 'loot', ammo: p.type === 'med' ? 0 : 1, inv: c.inv, txt: got });

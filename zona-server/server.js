@@ -8,7 +8,8 @@ const TICK = 30;
 // ---- загрузка общей симуляции (та же, что в браузере) ----
 vm.runInThisContext(fs.readFileSync(path.join(__dirname, 'sim.js'), 'utf8'), { filename: 'sim.js' });
 const { SV, World, Game, NET, Bus } = globalThis.__SV;
-World.generate();
+const MAPID = (process.env.MAP || 'poly').toLowerCase();
+World.generate(MAPID);
 Game.resetNet(); Game.noRagdoll = true; Game.lagComp = true; Game.noFF = true; Game.netServer = true;
 const env = process.env;
 if (env.ROTATION) SV.cfg.rotation = env.ROTATION.split(',').map(s => s.trim()).filter(s => ['tdm', 'ffa', 'elim', 'koth', 'coop'].includes(s));
@@ -30,7 +31,7 @@ loadHtml();
 const server = http.createServer((req, res) => {
   const u = req.url.split('?')[0];
   if (u === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
-  if (u === '/info') { res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); return res.end(JSON.stringify({ players: SV.humans().length, max: SV.cfg.maxPlayers, mode: SV.M ? SV.M.mode.id : null, map: mapSum })); }
+  if (u === '/info') { res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); return res.end(JSON.stringify({ players: SV.humans().length, max: SV.cfg.maxPlayers, mode: SV.M ? SV.M.mode.id : null, map: mapSum, mapId: World.mapId })); }
   if (u === '/' || u === '/index.html') {
     const gz = htmlGz && /gzip/.test(req.headers['accept-encoding'] || '');
     res.writeHead(200, Object.assign({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' }, gz ? { 'Content-Encoding': 'gzip' } : {}));
@@ -103,8 +104,8 @@ function onMessage(conn, s) {
     if (!sl) { wsSend(conn.sock, JSON.stringify({ t: 'err', m: 'Сервер заполнен' })); conn.sock.end(); return; }
     sl.ws = conn.sock; conn.slot = sl;
     const ents = Game.combatants.filter(c => c !== sl.c).map(c => Object.assign(NET.info(c), { st: NET.pack(c), al: c.alive ? 1 : 0 }));
-    const sp = sl.c ? { e: sl.c.id, x: sl.c.x, z: sl.c.z, yaw: sl.c.yaw, pri: sl.pri, team: sl.team, inv: sl.c.inv } : null;
-    wsSend(conn.sock, JSON.stringify({ t: 'welcome', pid: sl.pid, T: Game.time, map: mapSum, snapHz: SV.cfg.snapHz, spawn: sp, ents, pk: World.pickups.map((p, i) => p.taken ? i : -1).filter(i => i >= 0), name: sl.name }));
+    const sp = sl.c ? { e: sl.c.id, x: sl.c.x, y: sl.c.y, z: sl.c.z, yaw: sl.c.yaw, pri: sl.pri, team: sl.team, inv: sl.c.inv } : null;
+    wsSend(conn.sock, JSON.stringify({ t: 'welcome', pid: sl.pid, T: Game.time, map: mapSum, mapId: World.mapId, snapHz: SV.cfg.snapHz, spawn: sp, ents, pk: World.pickups.map((p, i) => p.taken ? i : -1).filter(i => i >= 0), name: sl.name }));
     SV.bcast({ t: 'chat', n: '', m: sl.name + ' подключился' }, sl);
     SV.sendBoard(true);
     if (SV.M) wsSend(conn.sock, JSON.stringify({ t: 'match', id: SV.M.mode.id, ru: SV.M.mode.ru, team: SV.M.mode.team, coop: !!SV.M.mode.coop }));
