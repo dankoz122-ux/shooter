@@ -15,6 +15,7 @@ const env = process.env;
 if (env.ROTATION) SV.cfg.rotation = env.ROTATION.split(',').map(s => s.trim()).filter(s => ['tdm', 'ffa', 'elim', 'koth', 'coop'].includes(s));
 if (!SV.cfg.rotation.length) SV.cfg.rotation = ['tdm'];
 if (env.DEV) SV.cfg.dev = true;
+if (env.ROUNDT) SV.cfg.roundT = +env.ROUNDT;
 if (env.TARGET) SV.cfg.target = Math.max(2, Math.min(20, +env.TARGET));
 if (env.DIFF) SV.cfg.diff = Math.max(0, Math.min(3, +env.DIFF));
 if (env.ARMOR) SV.cfg.armor = +env.ARMOR;
@@ -100,11 +101,11 @@ function onMessage(conn, s) {
   if (!conn.slot) {
     if (m.t !== 'hello') return;
     if (m.v !== NET.VER) { wsSend(conn.sock, JSON.stringify({ t: 'err', m: 'Версия клиента не совпадает с сервером. Обновите страницу.' })); conn.sock.end(); return; }
-    const sl = SV.join(null, null, m.name, m.pri);
+    const sl = SV.join(null, null, m.name, m.pri, m.att);
     if (!sl) { wsSend(conn.sock, JSON.stringify({ t: 'err', m: 'Сервер заполнен' })); conn.sock.end(); return; }
     sl.ws = conn.sock; conn.slot = sl;
     const ents = Game.combatants.filter(c => c !== sl.c).map(c => Object.assign(NET.info(c), { st: NET.pack(c), al: c.alive ? 1 : 0 }));
-    const sp = sl.c ? { e: sl.c.id, x: sl.c.x, y: sl.c.y, z: sl.c.z, yaw: sl.c.yaw, pri: sl.pri, team: sl.team, inv: sl.c.inv } : null;
+    const sp = sl.c ? { e: sl.c.id, x: sl.c.x, y: sl.c.y, z: sl.c.z, yaw: sl.c.yaw, pri: sl.pri, att: sl.att, team: sl.team, inv: sl.c.inv } : null;
     wsSend(conn.sock, JSON.stringify({ t: 'welcome', pid: sl.pid, T: Game.time, map: mapSum, mapId: World.mapId, snapHz: SV.cfg.snapHz, spawn: sp, ents, pk: World.pickups.map((p, i) => p.taken ? i : -1).filter(i => i >= 0), name: sl.name }));
     SV.bcast({ t: 'chat', n: '', m: sl.name + ' подключился' }, sl);
     SV.sendBoard(true);

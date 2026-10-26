@@ -1355,6 +1355,12 @@ const WEAPONS = {
     zeroSteps: [50, 100, 150, 200, 300, 400], zero0: 1, loud: 1.15,
     eyeRel: 0.25, sightH: 0.052, muzzleZ: 0.405, gripR: [0, -0.15, 0.212], gripL: [0, -0.07, -0.11], magPos: [0, -0.082, 0.048], rackPos: [0, -0.043, 0.125],
   },
+  cqb: {
+    id: 'cqb', name: 'CQB-R', cart: 'c556', rpm: 900, mag: 30, modes: ['auto', 'semi'], kind: 'rifle',
+    recV: 0.0066, recH: 0.0027, moa: 2.8, reload: { tac: 2.15, empty: 2.9 }, adsTime: 0.17,
+    zeroSteps: [25, 50, 100, 150, 200], zero0: 1, loud: 1.08, velMul: 0.93,
+    eyeRel: 0.2, zeroBias: 0.0012, sightH: 0.059, muzzleZ: 0.585, gripR: [0, -0.158, 0.03], gripL: [0, -0.063, -0.30], magPos: [0, -0.091, -0.138], rackPos: [0, -0.015, 0.06],
+  },
   glock: {
     id: 'glock', name: 'G17', cart: 'c9', rpm: 450, mag: 17, modes: ['semi'], kind: 'pistol',
     recV: 0.020, recH: 0.0060, moa: 5.5, reload: { tac: 1.7, empty: 2.2 }, adsTime: 0.14,
@@ -1398,7 +1404,7 @@ function rayCapsule(ox, oy, oz, dx, dy, dz, len, a, b, r) {
 const Ballistics = {
   list: [], acc: 0, STEP: 1 / 120,
   spawn(owner, cart, o, d, tracer, opt) {
-    const sp = cart.v * (1 + rnd(-0.012, 0.012));
+    const sp = cart.v * (1 + rnd(-0.012, 0.012)) * ((owner && owner.fx && owner.fx.vel) || 1) * ((owner && owner.weapon && owner.weapon.def && owner.weapon.def.velMul) || 1);
     this.list.push({
       x: o[0], y: o[1], z: o[2], vx: d[0] * sp, vy: d[1] * sp, vz: d[2] * sp,
       cart, owner, pen: cart.pen, pen0: cart.pen, dmgScale: 1, age: 0, dist: 0, tracer: !!tracer, rico: 0, whiz: false,
@@ -1535,6 +1541,84 @@ function dropAt(cart, dist) { const t = flightTime(cart, dist); return 0.5 * G *
 
 if (typeof module !== 'undefined') module.exports = { CART, WEAPONS, Ballistics, rayCapsule, flightTime, dropAt, dragMul };
 
+/* --- 21_attach.js --- */
+/* ===== Обвесы: реестр, совместимость, влияние на характеристики (клиент и сервер) ===== */
+const ATT = {
+  slots: ['optic', 'muzzle', 'grip', 'mag'],
+  names: { optic: 'Прицел', muzzle: 'Дульное устройство', grip: 'Рукоятка', mag: 'Магазин', laser: 'Лазерный целеуказатель' },
+  // h — высота линии прицеливания над штатной (м), fov — множитель угла обзора при прицеливании (на каждый уровень увеличения)
+  optic: {
+    iron:   { ru: 'Открытый прицел (штатный)', h: 0, fov: [0.56], adsT: 1, moa: 1, ret: null },
+    micro:  { ru: 'Микро-коллиматор на проставке', h: 0.012, ch: 0.04, fov: [0.60], adsT: 0.97, moa: 0.82, ret: 'ringdot' },
+    acro:   { ru: 'Закрытый рефлекс-коллиматор', h: 0.004, ch: 0.04, fov: [0.60], adsT: 0.95, moa: 0.84, ret: 'dot' },
+    holo:   { ru: 'Голографический RM132', h: 0.014, ch: 0.018, chw: { m4: 0.018, akm: 0.03, cqb: 0.0006 }, fov: [0.58], adsT: 1.0, moa: 0.8, ret: 'holo' },
+    reflex: { ru: 'Коллиматор 4-в-1', h: 0.010, ch: 0.042, fov: [0.60], adsT: 0.98, moa: 0.9, ret: 'multi' },
+    acog:   { ru: 'ACOG 4×', h: 0.010, ch: 0.052, fov: [0.19], adsT: 1.14, moa: 0.62, ret: 'chev', tube: true },
+    elcan:  { ru: 'Оптика 1–4× (DR)', h: 0.013, ch: 0.052, fov: [0.58, 0.19], adsT: 1.12, moa: 0.66, ret: 'dr', tube: true },
+  },
+  // recV/recH — отдача, loud — громкость (и дальность слышимости ботами), flash — вспышка, len — длина (м), vel — начальная скорость
+  muzzle: {
+    none:   { ru: 'Штатное дульное' },
+    ak_dtk: { ru: 'ДТК для АК (дульный тормоз-компенсатор)', recV: 0.76, recH: 0.84, loud: 1.28, flash: 0.9, len: 0.05, kind: 'dtk', w: ['akm'] },
+    f301:   { ru: 'Пламегаситель 3-щелевой 24×1,5', recV: 0.93, recH: 0.96, loud: 1.0, flash: 0.22, len: 0.07, kind: 'flash3', w: ['akm'] },
+    ar3:    { ru: 'Пламегаситель AR-15 3-щелевой', recV: 0.95, recH: 0.97, loud: 1.0, flash: 0.22, len: 0.08, kind: 'flash3', w: ['m4', 'cqb'] },
+    vg:     { ru: 'Компенсатор «VG»', recV: 0.8, recH: 0.78, loud: 1.32, flash: 0.7, len: 0.07, kind: 'comp', w: ['m4', 'cqb'] },
+    pbs:    { ru: 'ПБС (малогабаритный глушитель)', recV: 0.88, recH: 0.92, loud: 0.3, flash: 0.08, len: 0.17, vel: 0.97, adsT: 1.04, kind: 'pbs', w: ['akm'] },
+    air:    { ru: 'Глушитель Immortal Air', recV: 0.82, recH: 0.86, loud: 0.2, flash: 0.04, len: 0.26, vel: 0.965, adsT: 1.09, kind: 'can' },
+  },
+  grip: {
+    none:  { ru: 'Без рукоятки' },
+    vert:  { ru: 'Вертикальная рукоятка', recV: 0.87, recH: 0.9, hip: 0.88, adsT: 1.05, kind: 'vert', hand: [0, -0.09, -0.015] },
+    angled:{ ru: 'Угловая рукоятка', recV: 0.95, recH: 0.84, hip: 0.8, adsT: 0.92, kind: 'angled', hand: [0, -0.045, -0.02] },
+    pk6:   { ru: 'Упор ПК-6 на цевьё', recV: 0.92, recH: 0.93, hip: 0.95, adsT: 1.0, kind: 'pk6', w: ['akm'], hand: [0, -0.01, 0] },
+  },
+  mag: {
+    std:  { ru: 'Штатный магазин 30' },
+    drum: { ru: 'Барабанный магазин', reloadMul: 1.3, adsT: 1.06, hip: 1.1, kind: 'drum', cap: { m4: 60, akm: 75, cqb: 60 } },
+  },
+  // ограничения по оружию (по умолчанию доступно обоим)
+  allowed(wid, slot, id) {
+    if (!this.can(wid)) return id === (slot === 'optic' ? 'iron' : slot === 'mag' ? 'std' : 'none');
+    const o = this[slot][id]; if (!o) return false;
+    return !o.w || o.w.includes(wid);
+  },
+  can(wid) { return wid === 'm4' || wid === 'akm' || wid === 'cqb'; },
+  list(wid, slot) { return Object.keys(this[slot]).filter(id => this.allowed(wid, slot, id)); },
+  def() { return { optic: 'iron', muzzle: 'none', grip: 'none', mag: 'std', laser: 0 }; },
+  clean(wid, a) {
+    const o = this.def(); if (!a || typeof a !== 'object') return o;
+    for (const s of this.slots) { const v = String(a[s] || ''); if (this.allowed(wid, s, v)) o[s] = v; }
+    o.laser = a.laser && this.can(wid) ? 1 : 0;
+    return o;
+  },
+  isDefault(a) { return !a || (a.optic === 'iron' && a.muzzle === 'none' && a.grip === 'none' && a.mag === 'std' && !a.laser); },
+  rand(wid, skill) {
+    const o = this.def(); if (!this.can(wid)) return o;
+    const pk = (s, p) => { const l = this.list(wid, s).filter(x => x !== (s === 'optic' ? 'iron' : s === 'mag' ? 'std' : 'none')); if (l.length && Math.random() < p) o[s] = l[Math.floor(Math.random() * l.length)]; };
+    pk('optic', 0.55); pk('muzzle', 0.4); pk('grip', 0.35); pk('mag', 0.12); o.laser = Math.random() < 0.15 ? 1 : 0;
+    return o;
+  },
+  // итоговые множители
+  calc(wid, a) {
+    a = this.clean(wid, a);
+    const op = this.optic[a.optic], mz = this.muzzle[a.muzzle], gr = this.grip[a.grip], mg = this.mag[a.mag];
+    const m = {
+      recV: (mz.recV || 1) * (gr.recV || 1), recH: (mz.recH || 1) * (gr.recH || 1), moa: op.moa || 1,
+      hip: (gr.hip || 1) * (mg.hip || 1) * (a.laser ? 0.55 : 1), loud: mz.loud || 1, flash: mz.flash === undefined ? 1 : mz.flash, vel: mz.vel || 1,
+      adsT: (op.adsT || 1) * (mz.adsT || 1) * (gr.adsT || 1) * (mg.adsT || 1), reloadMul: mg.reloadMul || 1,
+      cap: mg.cap ? mg.cap[wid] : 0, optH: (op.chw && op.chw[wid] !== undefined ? op.chw[wid] : op.ch) || 0, fov: op.fov, ret: op.ret, tube: !!op.tube, muzLen: mz.len || 0, hand: gr.hand || null, laser: a.laser ? 1 : 0, supp: (mz.loud || 1) < 0.5,
+    };
+    const W = WEAPONS[wid];
+    if (W && gr.kind) { // положение левой руки на рукоятке
+      const gz = wid === 'akm' ? -0.19 : wid === 'cqb' ? -0.293 : -0.27, bot = wid === 'akm' ? -0.077 : wid === 'cqb' ? -0.090 : -0.097, b = W.gripL;
+      m.gripL = gr.kind === 'vert' ? [0, bot - 0.058, gz] : gr.kind === 'angled' ? [0, bot - 0.02, gz] : [b[0], b[1], gz - 0.03];
+    }
+    return m;
+  },
+};
+const ATT_NONE = ATT.calc('glock', null);
+if (typeof module !== 'undefined') module.exports = { ATT };
+
 /* --- 29_gait.js --- */
 /* Походка из клипов Mixamo Walk/Run (Soldier.glb из примеров three.js): форма траектории ноги, подъём, наклон стопы, качание таза.
    Фаза u=0 — середина маха левой ноги. */
@@ -1617,7 +1701,7 @@ function standPose(c) {
   };
   const def = c.weapon.def;
   p.tR = weaponWorld(p, def.gripR);
-  p.tL = weaponWorld(p, def.gripL);
+  p.tL = weaponWorld(p, c.cur === 0 && c.am.gripL ? c.am.gripL : def.gripL);
   // анимации рук
   if (c.healing) {
     const q = Math.sin(clamp(c.healing.t / c.healing.dur, 0, 1) * Math.PI);
@@ -1743,6 +1827,7 @@ class Combatant {
     this.alive = true; this.deathT = 0; this.deathDir = null; this.splay = rnd(0.1, 0.5);
     this.inv = o.inv || { bandage: 2, tourniquet: 1, splint: 1, pills: 1, medPool: 150 };
     if (this.inv.frag === undefined) this.inv.frag = 0; if (this.inv.flash === undefined) this.inv.flash = 0;
+    this._pidInit = o.primary || 'm4'; this.att = ATT.clean(o.primary || 'm4', o.att); this.am = ATT.calc(o.primary || 'm4', this.att); this.laserOn = false; this.zoomI = 0; this.retI = 0;
     this.weapons = [this.mkWeapon(o.primary || 'm4', o.mags === undefined ? 4 : o.mags), this.mkWeapon('glock', 3)];
     this.cur = 0; this.swapT = 0; this.swapTo = 0; this.fireT = 0; this.triggerHeld = false;
     this.reloadT = -1; this.reloadDur = 2; this.reloadKind = 'tac'; this.reloadFlags = {};
@@ -1759,9 +1844,12 @@ class Combatant {
     this.updateRig();
   }
   mkWeapon(id, mags) {
-    const def = WEAPONS[id];
-    return { def, mag: def.mag, chamber: 1, reserve: Array(mags).fill(def.mag), mode: def.modes[0], zeroI: def.zero0 };
+    const def = WEAPONS[id], cap = (id === this.weapons_primary_id() && this.am && this.am.cap) || def.mag;
+    const n = cap > def.mag ? Math.max(2, Math.round(mags * def.mag / cap)) : mags;
+    return { def, cap, mag: cap, chamber: 1, reserve: Array(n).fill(cap), mode: def.modes[0], zeroI: def.zero0 };
   }
+  weapons_primary_id() { return this._pid || (this._pid = this._pidInit); }
+  get fx() { return this.cur === 0 ? this.am : ATT_NONE; }
   get weapon() { return this.weapons[this.cur]; }
   totalHP() { let s = 0; for (const p of PARTS) s += this.parts[p].hp; return s; }
   totalMax() { return 440; }
@@ -1858,7 +1946,7 @@ class Combatant {
     this.h = lerp(1.8, 1.25, this.crouch);
     this.leanA = damp(this.leanA, clamp(I.lean, -1, 1), 9, dt);
     const adsT = I.ads && this.swapT <= 0 && this.reloadT < 0 && !this.healing && !this.sprinting && this.throwT < 0 && this.meleeT < 0 ? 1 : 0;
-    this.ads = clamp(this.ads + (adsT ? 1 : -1) * dt / Math.max(0.1, this.weapon.def.adsTime), 0, 1);
+    this.ads = clamp(this.ads + (adsT ? 1 : -1) * dt / Math.max(0.1, this.weapon.def.adsTime * this.fx.adsT), 0, 1);
     const wants = I.mx !== 0 || I.mz !== 0;
     const leg = this.legFactor();
     let max = 3.3, spr = false;
@@ -1969,10 +2057,10 @@ class Combatant {
   startReload() {
     const w = this.weapon;
     if (w.reserve.length === 0 || Math.max(...w.reserve) <= 0) return false;
-    if (w.mag >= w.def.mag && w.chamber > 0) return false;
+    if (w.mag >= (w.cap || w.def.mag) && w.chamber > 0) return false;
     this.reloadKind = w.chamber > 0 || w.mag > 0 ? 'tac' : 'empty';
     if (w.chamber <= 0) this.reloadKind = 'empty';
-    this.reloadDur = w.def.reload[this.reloadKind]; this.reloadT = 0; this.reloadFlags = {};
+    this.reloadDur = w.def.reload[this.reloadKind] * this.fx.reloadMul; this.reloadT = 0; this.reloadFlags = {};
     this.in.ads = this.in.ads; Bus.emit('reload', this);
     return true;
   }
@@ -1980,12 +2068,12 @@ class Combatant {
     const w = this.weapon, def = w.def, cart = CART[def.cart];
     w.chamber = 0; if (w.mag > 0) { w.mag--; w.chamber = 1; }
     this.fireT = 60 / def.rpm; this.lastFireT = this.t;
-    const rg = this.rig, eye = rg.W0, sdir = rg.wf, muz = V.add(V.mad(rg.W0, rg.wu, -def.sightH), V.mul(rg.wf, def.muzzleZ));
+    const fx = this.fx, rg = this.rig, eye = fx.optH ? V.mad(rg.W0, rg.wu, fx.optH) : rg.W0, sdir = rg.wf, muz = V.add(V.mad(rg.W0, rg.wu, -def.sightH), V.mul(rg.wf, def.muzzleZ + fx.muzLen));
     const Z = this.isPlayer ? def.zeroSteps[w.zeroI] : clamp(this.aimDist, 12, 400);
     const zp = [eye[0] + sdir[0] * Z, eye[1] + sdir[1] * Z + dropAt(cart, Z) - Z * ((def.zeroBias || 0) + (this.isPlayer ? (Game.zeroAdj || 0) : 0)), eye[2] + sdir[2] * Z];
     let d = V.norm(V.sub(zp, muz));
-    const moa = def.moa * 0.000291;
-    let ang = moa * this.shake + (1 - this.ads) * (this.isPlayer ? 0.014 : 0.006) + this.speed * 0.0014 + this.recoilBuild * 0.0035;
+    const moa = def.moa * fx.moa * 0.000291;
+    let ang = moa * this.shake + (1 - this.ads) * (this.isPlayer ? 0.014 : 0.006) * fx.hip + this.speed * 0.0014 + this.recoilBuild * 0.0035;
     if (this.suppress > 0.4) ang *= 1 + this.suppress;
     const rr = ang * Math.sqrt(Math.random()), th = Math.random() * Math.PI * 2;
     const up = Math.abs(d[1]) > 0.95 ? [1, 0, 0] : [0, 1, 0];
@@ -2001,7 +2089,7 @@ class Combatant {
     this.stats.shots++;
     // отдача
     const sc = (this.shake > 1 ? 1 + (this.shake - 1) * 0.3 : 1) * (this.ads > 0.5 ? 0.85 : 1.1);
-    const rv = def.recV * rnd(0.75, 1.25) * sc, rh = def.recH * rnd(-1, 1) * sc;
+    const rv = def.recV * fx.recV * rnd(0.75, 1.25) * sc, rh = def.recH * fx.recH * rnd(-1, 1) * sc;
     this.punchP += rv * 0.65; this.punchY += rh * 0.7;
     this.pitch += rv * 0.35; this.yaw += rh * 0.3;
     this.kick = Math.min(1.2, this.kick + 0.6); this.recoilBuild = Math.min(1, this.recoilBuild + 0.1);
@@ -2404,7 +2492,7 @@ class Brain {
     const empty = w.mag <= 0 && w.chamber <= 0;
     const reserve = w.reserve.reduce((a, b) => a + b, 0);
     if (empty && reserve <= 0 && c.cur === 0 && c.weapons[1].mag + c.weapons[1].chamber > 0) I.switchTo = 1;
-    else if (c.reloadT < 0 && c.swapT <= 0 && reserve > 0 && (empty || (!this.targetVisible && w.mag < 10 && w.mag < def.mag * 0.4))) I.reload = true;
+    else if (c.reloadT < 0 && c.swapT <= 0 && reserve > 0 && (empty || (!this.targetVisible && w.mag < 10 && w.mag < (w.cap || def.mag) * 0.4))) I.reload = true;
     // ---- лечение вне боя ----
     this.healCheck -= dt;
     if (!c.healing && this.healCheck <= 0 && now - this.lastSeenT > 3.5 && now - c.lastHitT > 3 && c.reloadT < 0) {
@@ -2600,7 +2688,7 @@ class Brain {
       if (!this.arrived(this.coverPos[0], this.coverPos[1], 0.8, this.coverPos[2])) this.go(this.coverPos[0], this.coverPos[1], dt, true, this.coverPos[2]);
       else { I.crouch = true; if (tgt) this.turnTo(Math.atan2(-(tgt.x - c.x), -(tgt.z - c.z)), 3, dt); }
     }
-    if (c.reloadT < 0 && c.weapon.mag < c.weapon.def.mag * 0.5 && c.ammoReserve() > 0) I.reload = true;
+    if (c.reloadT < 0 && c.weapon.mag < (c.weapon.cap || c.weapon.def.mag) * 0.5 && c.ammoReserve() > 0) I.reload = true;
   }
   doCombat(dt, tgt) {
     const c = this.c, I = c.in, def = c.weapon.def, now = Game.time;
@@ -2680,12 +2768,13 @@ function spawnBots(n, diffI, armor) {
     }
     if (!p) p = pick(pool);
     used.push(p);
+    const pr = ['m4', 'akm', 'cqb'][Math.floor(Math.random() * 3)];
     const b = new Combatant({
-      name: CALLSIGNS[i % CALLSIGNS.length], team: Game.mode === 'ffa' ? 10 + i : 1, x: p[0], z: p[1], y: p[2], yaw: rnd(0, Math.PI * 2),
-      primary: Math.random() < 0.5 ? 'm4' : 'akm', armor, mags: 3 + rndi(0, 2), inv: { bandage: 2, tourniquet: 1, splint: 1, pills: 1, medPool: 140, frag: Math.random() < 0.6 ? 1 : 0, flash: Math.random() < 0.4 ? 1 : 0 },
+      att: ATT.rand(pr), name: CALLSIGNS[i % CALLSIGNS.length], team: Game.mode === 'ffa' ? 10 + i : 1, x: p[0], z: p[1], y: p[2], yaw: rnd(0, Math.PI * 2),
+      primary: pr, armor, mags: 3 + rndi(0, 2), inv: { bandage: 2, tourniquet: 1, splint: 1, pills: 1, medPool: 140, frag: Math.random() < 0.6 ? 1 : 0, flash: Math.random() < 0.4 ? 1 : 0 },
     });
     b.brain = new Brain(b, { ...d, skill: clamp(d.skill + rnd(-0.08, 0.08), 0.2, 1), react: d.react * rnd(0.85, 1.2) });
-    b.isBot = true;
+    b.isBot = true; b.laserOn = !!b.am.laser;
     Game.combatants.push(b);
   }
 }
@@ -2694,7 +2783,7 @@ Bus.on('shot', e => {
   const s = e.c;
   for (const b of Game.combatants) {
     if (!b.brain || !b.alive || b === s || b.team === s.team) continue;
-    const d = Math.hypot(b.x - s.x, b.z - s.z), range = 330 * e.def.loud;
+    const d = Math.hypot(b.x - s.x, b.z - s.z), range = 330 * e.def.loud * (s.fx ? s.fx.loud : 1);
     if (d < range) b.brain.hear(s.x, s.z, d, 'shot', s.y);
   }
 });
@@ -2720,7 +2809,7 @@ Game.reset = function (o) {
   for (const p of World.pickups) p.taken = false;
   const sp = World.spawnPlayer;
   const pl = new Combatant({
-    name: 'Вы', team: 0, isPlayer: true, x: sp[0], z: sp[1], yaw: sp[3] || 0, primary: o.primary || 'm4', armor: this.armor, mags: 5,
+    name: 'Вы', team: 0, isPlayer: true, x: sp[0], z: sp[1], yaw: sp[3] || 0, primary: o.primary || 'm4', att: o.att, armor: this.armor, mags: 5,
     inv: { bandage: 4, tourniquet: 2, splint: 2, pills: 2, medPool: 260, frag: 2, flash: 1 },
   });
   pl.weapons[1].reserve = [17, 17, 17];
@@ -2788,8 +2877,8 @@ Game.takePickup = function (c, p) {
     return got.join(', ');
   }
   const w = c.weapons[0], g = c.weapons[1];
-  for (let i = 0; i < 2; i++) w.reserve.push(w.def.mag);
-  g.reserve.push(g.def.mag);
+  for (let i = 0; i < 2; i++) w.reserve.push(w.cap || w.def.mag);
+  g.reserve.push(g.cap || g.def.mag);
   return 'Магазины: ' + w.def.name + ' ×2, ' + g.def.name + ' ×1';
 };
 
@@ -2806,7 +2895,7 @@ const NET = {
     const F = this.F, P = this.PREC, a = new Array(F.length + 1);
     let fl = 0;
     if (c.grounded) fl |= 1; if (c.sprinting) fl |= 2; if (c.throwRel) fl |= 4; if (c.meleeKind === 'stab') fl |= 8; if (c.nade === 'flash') fl |= 16;
-    if (c.alive) fl |= 32; if (c.cur) fl |= 64; if (c.swapTo) fl |= 128; if (c.reloadKind === 'empty') fl |= 262144;
+    if (c.alive) fl |= 32; if (c.cur) fl |= 64; if (c.swapTo) fl |= 128; if (c.reloadKind === 'empty') fl |= 262144; if (c.laserOn) fl |= 524288;
     const PARTS_ = PARTS; let bm = 0; for (let i = 0; i < 7; i++) if (c.parts[PARTS_[i]].black) bm |= 1 << i;
     fl |= bm << 8; fl |= (c.healing ? Math.max(1, this.HT.indexOf(c.healing.type)) : 0) << 15;
     a[0] = fl;
@@ -2821,7 +2910,7 @@ const NET = {
     const F = this.F, fl = a[0];
     for (let i = 0; i < F.length; i++) { if (F[i] !== 'ht') c[F[i]] = a[i + 1]; }
     c.grounded = !!(fl & 1); c.sprinting = !!(fl & 2); c.throwRel = !!(fl & 4); c.meleeKind = (fl & 8) ? 'stab' : 'slash'; c.nade = (fl & 16) ? 'flash' : 'frag';
-    c.cur = (fl & 64) ? 1 : 0; c.swapTo = (fl & 128) ? 1 : 0; c.reloadKind = (fl & 262144) ? 'empty' : 'tac';
+    c.cur = (fl & 64) ? 1 : 0; c.swapTo = (fl & 128) ? 1 : 0; c.reloadKind = (fl & 262144) ? 'empty' : 'tac'; c.laserOn = !!(fl & 524288);
     if (srv) return;
     const bm = (fl >> 8) & 127; for (let i = 0; i < 7; i++) c.parts[PARTS[i]].black = !!(bm & (1 << i));
     const hi = (fl >> 15) & 7;
@@ -2841,7 +2930,7 @@ const NET = {
     c.pain = v.pain; c.painkiller = v.pk; c.stun = Math.max(c.stun, v.st); if (v.bl > c.blind) { c.blind = v.bl; c.blindMax = v.bm; } if (v.df > c.deaf) c.deaf = v.df; c.bleeding = v.bld;
     Object.assign(c.inv, v.inv);
   },
-  info(c) { return { id: c.id, name: c.name, team: c.team, bot: !!c.isBot, pri: c.weapons[0].def.id, human: !!c.isHuman, pid: c.pid }; },
+  info(c) { return { id: c.id, name: c.name, team: c.team, bot: !!c.isBot, pri: c.weapons[0].def.id, human: !!c.isHuman, pid: c.pid, att: ATT.isDefault(c.att) ? 0 : c.att }; },
 };
 if (typeof module !== 'undefined') module.exports = { NET };
 
@@ -2863,10 +2952,10 @@ const SV = {
   send(slot, o) { if (slot.human && this.out) this.out(slot, o); },
   bcast(o, except) { const s = JSON.stringify(o); for (const sl of this.slots) if (sl.human && sl !== except && this.outRaw) this.outRaw(sl, s); },
   /* ---------- вход/выход ---------- */
-  join(sendObj, sendRaw, name, pri) {
+  join(sendObj, sendRaw, name, pri, att) {
     const hs = this.humans();
     if (hs.length >= this.cfg.maxPlayers) return null;
-    const sl = { pid: this.nextPid++, human: true, name: String(name || 'Игрок').slice(0, 16), team: 0, c: null, kills: 0, deaths: 0, score: 0, pri: pri === 'akm' ? 'akm' : 'm4', respT: 0, rtt: 80, ping: 0, lastSt: 0, lastShot: 0, joinT: this.now() };
+    const sl = { pid: this.nextPid++, human: true, name: String(name || 'Игрок').slice(0, 16), team: 0, c: null, kills: 0, deaths: 0, score: 0, pri: (pri === 'akm' || pri === 'cqb') ? pri : 'm4', att: ATT.clean((pri === 'akm' || pri === 'cqb') ? pri : 'm4', att), respT: 0, rtt: 80, ping: 0, lastSt: 0, lastShot: 0, joinT: this.now() };
     this.slots.push(sl);
     sl.team = this.assignTeam(sl);
     if (this.idle) { this.idle = false; this.startMatch(this.cfg.rotation[this.rot % this.cfg.rotation.length]); }
@@ -2912,14 +3001,14 @@ const SV = {
     const mode = this.M.mode, sp = this.pickSpawn(sl.team, mode.team && !mode.coop);
     const yaw = Math.atan2(sp[0], sp[1]);
     const inv = sl.human ? { bandage: 3, tourniquet: 2, splint: 1, pills: 1, medPool: 220, frag: 2, flash: 1 } : { bandage: 2, tourniquet: 1, splint: 1, pills: 1, medPool: 140, frag: Math.random() < 0.6 ? 1 : 0, flash: Math.random() < 0.4 ? 1 : 0 };
-    const c = new Combatant({ name: sl.name, team: sl.team, x: sp[0], z: sp[1], y: sp[2], yaw, primary: sl.human ? sl.pri : (Math.random() < 0.5 ? 'm4' : 'akm'), armor: this.cfg.armor, mags: sl.human ? 5 : 3 + rndi(0, 2), inv });
+    const c = new Combatant({ name: sl.name, team: sl.team, x: sp[0], z: sp[1], y: sp[2], yaw, primary: sl.human ? sl.pri : (sl.pr = ['m4', 'akm', 'cqb'][Math.floor(Math.random() * 3)]), att: sl.human ? sl.att : ATT.rand(sl.pr), armor: this.cfg.armor, mags: sl.human ? 5 : 3 + rndi(0, 2), inv });
     c.slot = sl; sl.c = c;
     if (sl.human) { c.isHuman = true; c.netMode = 'human'; c.pid = sl.pid; c.protT = 2.5; c.weapons[1].reserve = [17, 17, 17]; c.protT = 2.5; }
     else {
       c.isBot = true; const d = DIFFS[clamp(this.cfg.diff + (mode.coop ? Math.min(2, Math.floor(this.M.wave / 4)) : 0), 0, 3)];
       c.brain = new Brain(c, { ...d, skill: clamp(d.skill + rnd(-0.08, 0.08), 0.2, 1), react: d.react * rnd(0.85, 1.2) }); c.protT = 1.5;
     }
-    c.hist = []; Game.combatants.push(c);
+    c.hist = []; if (!sl.human) c.laserOn = !!c.am.laser; Game.combatants.push(c);
     this.bcast({ t: 'ent', add: [Object.assign(NET.info(c), { st: NET.pack(c) })] }, sl.human ? sl : undefined);
     return c;
   },
@@ -2937,7 +3026,7 @@ const SV = {
     if (M.mode.coop && M.phase === 'live' && !first) { sl.respT = -1; return; }
     const c = this.makeEntity(sl);
     sl.respT = 0;
-    if (sl.human) this.send(sl, { t: 'spawn', e: c.id, x: c.x, y: c.y, z: c.z, yaw: c.yaw, pri: sl.pri, team: sl.team, inv: c.inv });
+    if (sl.human) this.send(sl, { t: 'spawn', e: c.id, x: c.x, y: c.y, z: c.z, yaw: c.yaw, pri: sl.pri, att: sl.att, team: sl.team, inv: c.inv });
   },
   /* ---------- матч ---------- */
   startMatch(modeId) {
@@ -3087,7 +3176,7 @@ const SV = {
   },
   tickElim(dt) {
     const M = this.M;
-    if (M.phase === 'freeze') { M.phT -= dt; if (M.phT <= 0) { M.phase = 'live'; M.phT = 150; M.msg = ''; this.bcast({ t: 'phase', ph: 'live', ms: '', tl: 150 }); } return; }
+    if (M.phase === 'freeze') { M.phT -= dt; if (M.phT <= 0) { M.phase = 'live'; M.phT = this.cfg.roundT || 150; M.msg = ''; this.bcast({ t: 'phase', ph: 'live', ms: '', tl: this.cfg.roundT || 150 }); } return; }
     if (M.phase === 'between') { M.phT -= dt; if (M.phT <= 0) this.startRound(); return; }
     if (M.phase !== 'live') return;
     M.phT -= dt;
@@ -3173,7 +3262,7 @@ const SV = {
       }
       case 'chat': { const txt = String(m.m || '').slice(0, 120).replace(/[<>]/g, ''); if (txt) this.bcast({ t: 'chat', n: sl.name, tm: sl.team, m: txt }); break; }
       case 'fall': if (c && c.alive && m.v > 9.5 && m.v < 40) Combat.fallDamage(c, +m.v); break;
-      case 'ld': sl.pri = m.pri === 'akm' ? 'akm' : 'm4'; break;
+      case 'ld': sl.pri = (m.pri === 'akm' || m.pri === 'cqb') ? m.pri : 'm4'; break;
       case 'ping': sl.rtt = clamp(+m.rtt || sl.rtt, 0, 2000); this.send(sl, { t: 'pong', c: m.c, T: Game.time }); break;
     }
   },
@@ -3223,7 +3312,7 @@ const SV = {
     Game.update(dt);
     this.tickMatch(dt);
     this.snapshots(dt);
-    for (const s of this.humans()) if (Game.time - (s.lastMsg || s.joinT) > 15 && this.kick) this.kick(s);
+    for (const s of this.humans()) if (Game.time - (s.lastMsg || s.joinT) > 15 && !this.cfg.dev && this.kick) this.kick(s);
   },
 };
 const SFX_OK = { reload: 1, magout: 1, magin: 1, rack: 1, dry: 1, swap: 1, pin: 1, throw: 1, meleestart: 1, meleemiss: 1, jump: 1, mode: 1, healstart: 1, healdone: 1 };
