@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: zona-kontakta
+    runtime: node
+    plan: free
+    buildCommand: echo "no build"
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    envVars:
+      - key: ROTATION
+        value: tdm,koth,elim,ffa,coop
+      - key: TARGET
+        value: "10"
+      - key: DIFF
+        value: "1"
