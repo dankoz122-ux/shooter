@@ -1331,6 +1331,8 @@ const CART = {
   c556: { name: '5.56x45 M855', dmg: 54, pen: 31, v: 922, mass: 0.0040, cal: 0.00556, cd: 0.30 },
   c762: { name: '7.62x39 PS',   dmg: 57, pen: 35, v: 715, mass: 0.0079, cal: 0.00762, cd: 0.33 },
   c9:   { name: '9x19 Pst',     dmg: 52, pen: 20, v: 360, mass: 0.0075, cal: 0.00900, cd: 0.36 },
+  c939: { name: '9x39 SP-5',     dmg: 62, pen: 40, v: 295, mass: 0.0162, cal: 0.00900, cd: 0.38 },
+  c762n: { name: '7.62x51 M80', dmg: 74, pen: 44, v: 853, mass: 0.0097, cal: 0.00782, cd: 0.31 },
 };
 for (const k in CART) { const c = CART[k]; c.k = 0.5 * RHO * c.cd * Math.PI * (c.cal / 2) ** 2 / c.mass; }
 
@@ -1361,6 +1363,18 @@ const WEAPONS = {
     zeroSteps: [25, 50, 100, 150, 200], zero0: 1, loud: 1.08, velMul: 0.93,
     eyeRel: 0.2, zeroBias: 0.0012, sightH: 0.059, muzzleZ: 0.585, gripR: [0, -0.158, 0.03], gripL: [0, -0.063, -0.30], magPos: [0, -0.091, -0.138], rackPos: [0, -0.015, 0.06],
   },
+  m14: {
+    id: 'm14', name: 'M14 EBR', cart: 'c762n', rpm: 760, mag: 20, modes: ['semi', 'burst', 'auto'], kind: 'rifle',
+    recV: 0.0165, recH: 0.0068, moa: 1.7, reload: { tac: 2.5, empty: 3.3 }, adsTime: 0.27,
+    zeroSteps: [50, 100, 150, 200, 300, 400], zero0: 1, loud: 1.3,
+    eyeRel: 0.2, sightH: 0.0565, muzzleZ: 0.631, gripR: [0, -0.145, 0.100], gripL: [0, -0.078, -0.305], magPos: [0, -0.130, -0.115], rackPos: [0, -0.040, 0.030],
+  },
+  val: {
+    id: 'val', name: 'АС «Вал»', cart: 'c939', rpm: 700, mag: 20, modes: ['auto', 'semi'], kind: 'rifle',
+    recV: 0.0072, recH: 0.0030, moa: 2.6, reload: { tac: 2.3, empty: 3.0 }, adsTime: 0.21,
+    zeroSteps: [25, 50, 100, 150, 200], zero0: 1, loud: 0.6,
+    eyeRel: 0.40, sightH: 0.030, muzzleZ: 0.324, gripR: [0, -0.12, 0.275], gripL: [0, -0.045, 0.062], magPos: [0, -0.128, 0.118], rackPos: [0.02, -0.032, 0.11],
+  },
   glock: {
     id: 'glock', name: 'G17', cart: 'c9', rpm: 450, mag: 17, modes: ['semi'], kind: 'pistol',
     recV: 0.020, recH: 0.0060, moa: 5.5, reload: { tac: 1.7, empty: 2.2 }, adsTime: 0.14,
@@ -1368,6 +1382,9 @@ const WEAPONS = {
     eyeRel: 0.30, sightH: 0.027, muzzleZ: 0.178, gripR: [0, -0.092, 0.030], gripL: [0.018, -0.088, 0.034], magPos: [0, -0.150, 0.040], rackPos: [0, -0.022, 0.004],
   },
 };
+
+const PRIMARIES = ['m4', 'akm', 'cqb', 'm14', 'val']; // основное оружие (меню, сеть, боты)
+const priOr = id => PRIMARIES.includes(id) ? id : 'm4';
 
 /* ---------- пересечение луча с капсулой ---------- */
 function rayCapsule(ox, oy, oz, dx, dy, dz, len, a, b, r) {
@@ -1549,32 +1566,34 @@ const ATT = {
   // h — высота линии прицеливания над штатной (м), fov — множитель угла обзора при прицеливании (на каждый уровень увеличения)
   optic: {
     iron:   { ru: 'Открытый прицел (штатный)', h: 0, fov: [0.56], adsT: 1, moa: 1, ret: null },
-    micro:  { ru: 'Микро-коллиматор на проставке', h: 0.012, ch: 0.04, fov: [0.60], adsT: 0.97, moa: 0.82, ret: 'ringdot' },
-    acro:   { ru: 'Закрытый рефлекс-коллиматор', h: 0.004, ch: 0.04, fov: [0.60], adsT: 0.95, moa: 0.84, ret: 'dot' },
-    holo:   { ru: 'Голографический RM132', h: 0.014, ch: 0.018, chw: { m4: 0.018, akm: 0.03, cqb: 0.0006 }, fov: [0.58], adsT: 1.0, moa: 0.8, ret: 'holo' },
-    reflex: { ru: 'Коллиматор 4-в-1', h: 0.010, ch: 0.042, fov: [0.60], adsT: 0.98, moa: 0.9, ret: 'multi' },
-    acog:   { ru: 'ACOG 4×', h: 0.010, ch: 0.052, fov: [0.19], adsT: 1.14, moa: 0.62, ret: 'chev', tube: true },
-    elcan:  { ru: 'Оптика 1–4× (DR)', h: 0.013, ch: 0.052, fov: [0.58, 0.19], adsT: 1.12, moa: 0.66, ret: 'dr', tube: true },
+    micro:  { ru: 'Микро-коллиматор на проставке', h: 0.012, ch: 0.04, chw: { m14: 0.0125, val: 0.0095 }, fov: [0.60], adsT: 0.97, moa: 0.82, ret: 'ringdot' },
+    acro:   { ru: 'Закрытый рефлекс-коллиматор', h: 0.004, ch: 0.04, chw: { m4: 0.0065, cqb: 0.0195, m14: 0.042, val: 0.039 }, fov: [0.60], adsT: 0.95, moa: 0.84, ret: 'dot' },
+    holo:   { ru: 'Голографический RM132', h: 0.014, ch: 0.018, chw: { m4: 0.018, akm: 0.03, cqb: 0.0006, m14: 0.0255, val: 0.0229 }, fov: [0.58], adsT: 1.0, moa: 0.8, ret: 'holo' },
+    reflex: { ru: 'Коллиматор 4-в-1', h: 0.010, ch: 0.042, chw: { m4: -0.0143, cqb: -0.0013, m14: 0.0212, val: 0.0182 }, fov: [0.60], adsT: 0.98, moa: 0.9, ret: 'multi' },
+    acog:   { ru: 'ACOG 4×', h: 0.010, ch: 0.052, chw: { m4: 0.004, cqb: 0.017, m14: 0.0395, val: 0.0365 }, fov: [0.56], adsT: 1.14, moa: 0.62, ret: 'chev', pip: { M: [4], r: 0.0145, z: 0.0312, rel: 0.08 } },
+    elcan:  { ru: 'Оптика 1–4× (DR)', h: 0.013, ch: 0.052, chw: { m4: 0.0098, cqb: 0.0228, m14: 0.0453, val: 0.0423 }, fov: [0.56, 0.56], adsT: 1.12, moa: 0.66, ret: 'dr', pip: { M: [1, 4], r: 0.0165, z: 0.05 } },
   },
   // recV/recH — отдача, loud — громкость (и дальность слышимости ботами), flash — вспышка, len — длина (м), vel — начальная скорость
   muzzle: {
-    none:   { ru: 'Штатное дульное' },
+    none:   { ru: 'Штатное дульное', w: ['m4', 'akm', 'cqb', 'm14'] },
+    integ:  { ru: 'Встроенный глушитель (ПБС)', recV: 1, recH: 1, loud: 0.22, flash: 0.05, len: 0, kind: 'integ', w: ['val'] },
     ak_dtk: { ru: 'ДТК для АК (дульный тормоз-компенсатор)', recV: 0.76, recH: 0.84, loud: 1.28, flash: 0.9, len: 0.05, kind: 'dtk', w: ['akm'] },
     f301:   { ru: 'Пламегаситель 3-щелевой 24×1,5', recV: 0.93, recH: 0.96, loud: 1.0, flash: 0.22, len: 0.07, kind: 'flash3', w: ['akm'] },
     ar3:    { ru: 'Пламегаситель AR-15 3-щелевой', recV: 0.95, recH: 0.97, loud: 1.0, flash: 0.22, len: 0.08, kind: 'flash3', w: ['m4', 'cqb'] },
     vg:     { ru: 'Компенсатор «VG»', recV: 0.8, recH: 0.78, loud: 1.32, flash: 0.7, len: 0.07, kind: 'comp', w: ['m4', 'cqb'] },
     pbs:    { ru: 'ПБС (малогабаритный глушитель)', recV: 0.88, recH: 0.92, loud: 0.3, flash: 0.08, len: 0.17, vel: 0.97, adsT: 1.04, kind: 'pbs', w: ['akm'] },
-    air:    { ru: 'Глушитель Immortal Air', recV: 0.82, recH: 0.86, loud: 0.2, flash: 0.04, len: 0.26, vel: 0.965, adsT: 1.09, kind: 'can' },
+    air:    { ru: 'Глушитель Immortal Air', recV: 0.82, recH: 0.86, loud: 0.2, flash: 0.04, len: 0.26, vel: 0.965, adsT: 1.09, kind: 'can', w: ['m4', 'akm', 'cqb', 'm14'] },
   },
   grip: {
     none:  { ru: 'Без рукоятки' },
-    vert:  { ru: 'Вертикальная рукоятка', recV: 0.87, recH: 0.9, hip: 0.88, adsT: 1.05, kind: 'vert', hand: [0, -0.09, -0.015] },
-    angled:{ ru: 'Угловая рукоятка', recV: 0.95, recH: 0.84, hip: 0.8, adsT: 0.92, kind: 'angled', hand: [0, -0.045, -0.02] },
+    vert:  { ru: 'Вертикальная рукоятка', recV: 0.87, recH: 0.9, hip: 0.88, adsT: 1.05, kind: 'vert', hand: [0, -0.09, -0.015], w: ['m4', 'akm', 'cqb', 'm14'] },
+    angled:{ ru: 'Угловая рукоятка', recV: 0.95, recH: 0.84, hip: 0.8, adsT: 0.92, kind: 'angled', hand: [0, -0.045, -0.02], w: ['m4', 'akm', 'cqb', 'm14'] },
     pk6:   { ru: 'Упор ПК-6 на цевьё', recV: 0.92, recH: 0.93, hip: 0.95, adsT: 1.0, kind: 'pk6', w: ['akm'], hand: [0, -0.01, 0] },
   },
   mag: {
-    std:  { ru: 'Штатный магазин 30' },
-    drum: { ru: 'Барабанный магазин', reloadMul: 1.3, adsT: 1.06, hip: 1.1, kind: 'drum', cap: { m4: 60, akm: 75, cqb: 60 } },
+    std:  { ru: 'Штатный магазин 30', ruw: { m14: 'Штатный магазин 20', val: 'Штатный магазин 20' } },
+    ext:  { ru: 'Усиленный магазин 30', reloadMul: 1.1, adsT: 1.0, hip: 1.03, kind: 'ext', cap: { m14: 30 }, w: ['m14'] },
+    drum: { ru: 'Барабанный магазин', reloadMul: 1.3, adsT: 1.06, hip: 1.1, kind: 'drum', cap: { m4: 60, akm: 75, cqb: 60 }, w: ['m4', 'akm', 'cqb'] },
   },
   // ограничения по оружию (по умолчанию доступно обоим)
   allowed(wid, slot, id) {
@@ -1582,20 +1601,23 @@ const ATT = {
     const o = this[slot][id]; if (!o) return false;
     return !o.w || o.w.includes(wid);
   },
-  can(wid) { return wid === 'm4' || wid === 'akm' || wid === 'cqb'; },
+  // смещение оптики вдоль оси оружия (+ назад): на АК планка у казённика, на M14 — прицелы стоят прямо на дальней части длинной рейки шасси, без переходников
+  dz: { akm: 0.12, m14: -0.18, val: 0.12 },
+  can(wid) { return wid === 'm4' || wid === 'akm' || wid === 'cqb' || wid === 'm14' || wid === 'val'; },
+  laserOk(wid) { return this.can(wid) && wid !== 'val'; }, // на «Вале» нет планок под лазерный блок
   list(wid, slot) { return Object.keys(this[slot]).filter(id => this.allowed(wid, slot, id)); },
-  def() { return { optic: 'iron', muzzle: 'none', grip: 'none', mag: 'std', laser: 0 }; },
+  def(wid) { return { optic: 'iron', muzzle: wid === 'val' ? 'integ' : 'none', grip: 'none', mag: 'std', laser: 0 }; },
   clean(wid, a) {
-    const o = this.def(); if (!a || typeof a !== 'object') return o;
+    const o = this.def(wid); if (!a || typeof a !== 'object') return o;
     for (const s of this.slots) { const v = String(a[s] || ''); if (this.allowed(wid, s, v)) o[s] = v; }
-    o.laser = a.laser && this.can(wid) ? 1 : 0;
+    o.laser = a.laser && this.laserOk(wid) ? 1 : 0;
     return o;
   },
-  isDefault(a) { return !a || (a.optic === 'iron' && a.muzzle === 'none' && a.grip === 'none' && a.mag === 'std' && !a.laser); },
+  isDefault(a) { return !a || (a.optic === 'iron' && (a.muzzle === 'none' || a.muzzle === 'integ') && a.grip === 'none' && a.mag === 'std' && !a.laser); },
   rand(wid, skill) {
-    const o = this.def(); if (!this.can(wid)) return o;
-    const pk = (s, p) => { const l = this.list(wid, s).filter(x => x !== (s === 'optic' ? 'iron' : s === 'mag' ? 'std' : 'none')); if (l.length && Math.random() < p) o[s] = l[Math.floor(Math.random() * l.length)]; };
-    pk('optic', 0.55); pk('muzzle', 0.4); pk('grip', 0.35); pk('mag', 0.12); o.laser = Math.random() < 0.15 ? 1 : 0;
+    const o = this.def(wid); if (!this.can(wid)) return o;
+    const pk = (s, p) => { const l = this.list(wid, s).filter(x => x !== (s === 'optic' ? 'iron' : s === 'mag' ? 'std' : s === 'muzzle' && wid === 'val' ? 'integ' : 'none')); if (l.length && Math.random() < p) o[s] = l[Math.floor(Math.random() * l.length)]; };
+    pk('optic', 0.55); pk('muzzle', 0.4); pk('grip', 0.35); pk('mag', 0.12); o.laser = this.laserOk(wid) && Math.random() < 0.15 ? 1 : 0;
     return o;
   },
   // итоговые множители
@@ -1606,11 +1628,11 @@ const ATT = {
       recV: (mz.recV || 1) * (gr.recV || 1), recH: (mz.recH || 1) * (gr.recH || 1), moa: op.moa || 1,
       hip: (gr.hip || 1) * (mg.hip || 1) * (a.laser ? 0.55 : 1), loud: mz.loud || 1, flash: mz.flash === undefined ? 1 : mz.flash, vel: mz.vel || 1,
       adsT: (op.adsT || 1) * (mz.adsT || 1) * (gr.adsT || 1) * (mg.adsT || 1), reloadMul: mg.reloadMul || 1,
-      cap: mg.cap ? mg.cap[wid] : 0, optH: (op.chw && op.chw[wid] !== undefined ? op.chw[wid] : op.ch) || 0, fov: op.fov, ret: op.ret, tube: !!op.tube, muzLen: mz.len || 0, hand: gr.hand || null, laser: a.laser ? 1 : 0, supp: (mz.loud || 1) < 0.5,
+      cap: mg.cap ? mg.cap[wid] : 0, optH: (op.chw && op.chw[wid] !== undefined ? op.chw[wid] : op.ch) || 0, fov: op.fov, ret: op.ret, tube: !!op.tube, pip: op.pip ? { M: op.pip.M, rel: op.pip.rel || 0.1, r: op.pip.r, z: op.pip.z + (this.dz[wid] || 0) } : null, muzLen: mz.len || 0, gk: gr.kind || '', hand: gr.hand || null, laser: a.laser ? 1 : 0, supp: (mz.loud || 1) < 0.5,
     };
     const W = WEAPONS[wid];
     if (W && gr.kind) { // положение левой руки на рукоятке
-      const gz = wid === 'akm' ? -0.19 : wid === 'cqb' ? -0.293 : -0.27, bot = wid === 'akm' ? -0.077 : wid === 'cqb' ? -0.090 : -0.097, b = W.gripL;
+      const gz = { akm: -0.19, cqb: -0.293, m14: -0.34 }[wid] || -0.27, bot = { akm: -0.077, cqb: -0.090, m14: -0.083 }[wid] || -0.097, b = W.gripL;
       m.gripL = gr.kind === 'vert' ? [0, bot - 0.058, gz] : gr.kind === 'angled' ? [0, bot - 0.02, gz] : [b[0], b[1], gz - 0.03];
     }
     return m;
@@ -1675,27 +1697,55 @@ const ARM1 = 0.30, ARM2 = 0.33, LEG1 = 0.45, LEG2 = 0.45;
 /* ---------- поза -> скелет ---------- */
 function weaponWorld(p, l) { return [p.W0[0] + p.wr[0] * l[0] + p.wu[0] * l[1] - p.wf[0] * l[2], p.W0[1] + p.wr[1] * l[0] + p.wu[1] * l[1] - p.wf[1] * l[2], p.W0[2] + p.wr[2] * l[0] + p.wu[2] * l[1] - p.wf[2] * l[2]]; }
 
+// M4 и CQB-R: движение рук, магазина и самого оружия берётся из авторского пака (js/69_anim_m4.js); у остальных стволов процедурная анимация
+const _CLIPW = { m4: 1, cqb: 1 }, CLIP_ACT = { reload: 0.74, empty: 0.84 }; // доля клипа до возврата рук в покой (хвост клипа — простой)
+const REL_EV = { m4: { tac: { out: 0.365, swap: 0.80 }, empty: { out: 0.31, swap: 0.68, rack: 0.83 } } }; REL_EV.cqb = REL_EV.m4;
+const _A = new Float32Array(21);
+function clipOf(c) {
+  if (typeof m4Sample !== 'function' || !c.alive || !_CLIPW[c.weapon.def.id]) return null;
+  if (c.swapT > 0) return c.swapT > 0.3 ? { k: 'holster', u: (0.6 - c.swapT) / 0.3 } : { k: 'draw', u: (0.3 - c.swapT) / 0.3 };
+  if (c.reloadT >= 0 && !c.healing) { const k = c.reloadKind === 'empty' ? 'empty' : 'reload'; return { k, u: Math.min(1, c.reloadT / c.reloadDur) * CLIP_ACT[k], rel: true }; }
+  return null;
+}
+const LEAN_TILT = 0.52; // угол наклона корпуса при полном крене (рад, ≈30°); камера и оружие кренятся на тот же угол
 function standPose(c) {
   const s = Math.sin(c.yaw), co = Math.cos(c.yaw);
   const F = [-s, 0, -co], R = [co, 0, -s], U = [0, 1, 0];
   const k = c.crouch, lean = c.leanA;
-  const P = [c.x, c.y + 0.90 - 0.34 * k, c.z];
+  // наклон вбок — вращение корпуса вокруг оси таза (вперёд-назад) на угол до ~38°, таз смещается в сторону наклона
+  const P = [c.x + R[0] * lean * 0.10, c.y + 0.90 - 0.34 * k - Math.abs(lean) * 0.03, c.z + R[2] * lean * 0.10];
   const tp = clamp(-c.pitch * 0.30, -0.30, 0.40) + 0.32 * k;
-  const sd = V.norm([R[0] * lean * 0.5 + F[0] * tp, 1, R[2] * lean * 0.5 + F[2] * tp]);
+  const lth = lean * LEAN_TILT, lsn = Math.sin(lth);
+  const sd = V.norm([R[0] * lsn + F[0] * tp, Math.cos(lth), R[2] * lsn + F[2] * tp]);
   const C = V.mad(P, sd, 0.37);
   const cr = V.norm(V.mad(R, sd, -V.dot(R, sd)));
   const cf = V.cross(sd, cr);
   const hf = fwdVec(c.yaw, clamp(c.pitch * 0.8, -1.2, 1.2));
-  const hu = V.cross(R, hf);
+  let hr = R, hu = V.cross(R, hf);
+  if (lean) { const lr = -lth * 0.8, lc = Math.cos(lr), ls = Math.sin(lr); hr = V.add(V.mul(R, lc), V.mul(hu, ls)); hu = V.sub(V.mul(hu, lc), V.mul(R, ls)); } // голова наклоняется вместе с корпусом
   const H = V.add(V.mad(C, sd, 0.34), V.mul(cf, 0.02));
   const low = c.lowReady;
-  const wp = clamp(c.pitch + c.punchP * 0.5 - low * 0.75 + (c.reloadT >= 0 ? 0.25 : 0), -1.4, 1.4);
-  const a = fwdVec(c.yaw + c.punchY * 0.5 + c.swayY, wp + c.swayP);
-  const wr = V.norm(V.cross(a, U)), wu = V.cross(wr, a);
+  // АК: при смене магазина ствол задирается и кренится, открывая магазинное окно (как в эталонном ролике); прочие стволы — прежний общий наклон
+  const ak = c.weapon.def.id === 'akm', rp = c.reloadT >= 0 ? c.reloadT / c.reloadDur : -1;
+  const akEnv = ak && rp >= 0 ? sm01(rp / 0.12) * (1 - sm01((rp - 0.9) / 0.1)) : 0;
+  const clip = clipOf(c); c.animMag = null;
+  const wp = clamp(c.pitch + c.punchP * 0.5 - low * 0.75 + (rp >= 0 && !clip ? (ak ? 0.5 * akEnv : 0.25) : 0), -1.4, 1.4);
+  let a = fwdVec(c.yaw + c.punchY * 0.5 + c.swayY, wp + c.swayP);
+  let wr = V.norm(V.cross(a, U)), wu = V.cross(wr, a), gpos = null;
+  if (clip) { // поворот и сдвиг оружия относительно тела — из клипа (в осях оружия: x вправо, y вверх, z назад)
+    const A = m4Sample(clip.k, clip.u, _A), x = A[14], y = A[15], z = A[16], w = A[17], wb = V.mul(a, -1);
+    const m = [[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)], [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)], [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]];
+    const ax = i => V.add(V.add(V.mul(wr, m[0][i]), V.mul(wu, m[1][i])), V.mul(wb, m[2][i]));
+    const nr = ax(0), nu = ax(1), nb = ax(2);
+    gpos = [A[18], A[19], A[20]]; wr = nr; wu = nu; a = V.mul(nb, -1);
+  }
+  if (akEnv > 0) { const rl = 0.16 * akEnv, cs = Math.cos(rl), sn = Math.sin(rl); const wr2 = V.add(V.mul(wr, cs), V.mul(wu, sn)); wu = V.sub(V.mul(wu, cs), V.mul(wr, sn)); wr = wr2; }
+  if (lean) { const lr = -lth, lc = Math.cos(lr), ls = Math.sin(lr); const wr2 = V.add(V.mul(wr, lc), V.mul(wu, ls)); wu = V.sub(V.mul(wu, lc), V.mul(wr, ls)); wr = wr2; } // оружие кренится вместе с корпусом (вокруг своей оси ствола)
   const SR = V.add(V.mad(C, cr, 0.20), V.mul(sd, 0.15));
-  const W0 = V.add(V.add(V.mad(SR, a, 0.27 - low * 0.05), V.mul(wr, -0.06)), V.mul(wu, -0.05 - low * 0.06));
+  let W0 = V.add(V.add(V.mad(SR, a, 0.27 - low * 0.05), V.mul(wr, -0.06)), V.mul(wu, -0.05 - low * 0.06));
+  if (gpos) W0 = V.add(V.add(V.mad(W0, wr, gpos[0]), V.mul(wu, gpos[1])), V.mul(a, -gpos[2]));
   const p = {
-    P, pr: R, pu: U, pf: F, C, cr, cu: sd, cf, H, hr: R, hu, hf, W0, wr, wu, wf: a,
+    P, pr: R, pu: U, pf: F, C, cr, cu: sd, cf, H, hr, hu, hf, W0, wr, wu, wf: a,
     polR: V.norm([R[0] * 0.7 - 0, -1, R[2] * 0.7]), polL: V.norm([-R[0] * 0.8, -1, -R[2] * 0.8]),
     kp: [F[0], 0, F[2]], R, F, SRoff: 0.20,
   };
@@ -1707,12 +1757,25 @@ function standPose(c) {
     const q = Math.sin(clamp(c.healing.t / c.healing.dur, 0, 1) * Math.PI);
     p.tR = V.add(V.add(V.mad(C, cf, 0.26), V.mul(cr, 0.10)), V.mul(sd, -0.10 + q * 0.04));
     p.tL = V.add(V.add(V.mad(C, cf, 0.24 + q * 0.06), V.mul(cr, -0.10)), V.mul(sd, -0.05));
+  } else if (clip && clip.rel) {
+    const A = m4Sample(clip.k, clip.u, _A), Ag = m4Sample(clip.k, 0.2, new Float32Array(21)), u = clip.u, emp = clip.k === 'empty';
+    const gl = (c.cur === 0 && c.am.gripL) ? c.am.gripL : def.gripL, gr = def.gripR, mp = def.magPos;
+    // рука держит магазин на участке выхода/входа: подгоняем путь клипа под положение магазинного окна этого оружия
+    const e = [mp[0] - 0.035 - (gl[0] + Ag[0]), mp[1] - 0.035 - (gl[1] + Ag[1]), mp[2] - (gl[2] + Ag[2])];
+    const w = emp ? sm01((u - 0.04) / 0.11) * (1 - sm01((u - 0.57) / 0.09)) : sm01((u - 0.03) / 0.13) * (1 - sm01((u - 0.60) / 0.10));
+    p.tL = weaponWorld(p, [gl[0] + A[0] + e[0] * w, gl[1] + A[1] + e[1] * w, gl[2] + A[2] + e[2] * w]);
+    p.tR = weaponWorld(p, [gr[0] + A[3], gr[1] + A[4], gr[2] + A[5]]);
+    c.animMag = [A[6], A[7], A[8], A[9], A[10], A[11], A[12]];
   } else if (c.reloadT >= 0) {
     const pr = c.reloadT / c.reloadDur, hg = p.tL;
-    const mag = weaponWorld(p, def.magPos), rack = weaponWorld(p, def.rackPos);
+    const mag = weaponWorld(p, def.magPos), rack = weaponWorld(p, def.rackPos), wf = p.wf;
     const pouch = V.add(V.add(V.mad(C, cf, 0.20), V.mul(cr, -0.14)), V.mul(sd, -0.22));
-    const K = [[0, hg], [0.18, mag], [0.40, pouch], [0.50, pouch], [0.64, mag], [0.78, mag]];
-    if (c.reloadKind === 'empty') K.push([0.84, rack], [0.92, rack], [1, hg]); else K.push([0.9, hg], [1, hg]);
+    let K = [[0, hg], [0.18, mag], [0.40, pouch], [0.50, pouch], [0.64, mag], [0.78, mag]];
+    if (ak) { // АК: хват магазина, вынос вперёд-вниз «качелей», подсумок, новый магазин носком вперёд снизу, поворот на место, хлопок по основанию
+      const out = V.add(V.mad(mag, wu, -0.10), V.mul(wf, 0.045)), app = V.add(V.mad(mag, wu, -0.09), V.mul(wf, 0.05)), slap = V.mad(mag, wu, -0.035);
+      K = [[0, hg], [0.12, V.mad(mag, wu, -0.02)], [0.20, mag], [0.32, out], [0.42, pouch], [0.52, pouch], [0.64, app], [0.74, mag], [0.79, slap], [0.83, mag]];
+    }
+    if (c.reloadKind === 'empty') K.push([ak ? 0.88 : 0.84, rack], [0.94, rack], [1, hg]); else K.push([0.92, hg], [1, hg]);
     let out = K[K.length - 1][1];
     for (let i = 0; i < K.length - 1; i++) if (pr <= K[i + 1][0]) { out = V.lerp(K[i][1], K[i + 1][1], sm01((pr - K[i][0]) / (K[i + 1][0] - K[i][0]))); break; }
     p.tL = out;
@@ -1829,7 +1892,7 @@ class Combatant {
     if (this.inv.frag === undefined) this.inv.frag = 0; if (this.inv.flash === undefined) this.inv.flash = 0;
     this._pidInit = o.primary || 'm4'; this.att = ATT.clean(o.primary || 'm4', o.att); this.am = ATT.calc(o.primary || 'm4', this.att); this.laserOn = false; this.zoomI = 0; this.retI = 0;
     this.weapons = [this.mkWeapon(o.primary || 'm4', o.mags === undefined ? 4 : o.mags), this.mkWeapon('glock', 3)];
-    this.cur = 0; this.swapT = 0; this.swapTo = 0; this.fireT = 0; this.triggerHeld = false;
+    this.cur = 0; this.swapT = 0; this.swapTo = 0; this.fireT = 0; this.triggerHeld = false; this.burstLeft = 0;
     this.reloadT = -1; this.reloadDur = 2; this.reloadKind = 'tac'; this.reloadFlags = {};
     this.healing = null; this.lowReady = 0.4; this.idleLow = 0.5; this.shake = 1; this.holdT = 0; this.gasp = 0; this.lastFireT = -9;
     this.swayP = 0; this.swayY = 0; this.wallLow = 0; this.punchP = 0; this.punchY = 0; this.kick = 0; this.recoilBuild = 0; this.hitKick = { p: 0, y: 0 };
@@ -1944,7 +2007,10 @@ class Combatant {
     if (!wantC && this.crouch > 0.5 && World.blockedAt(this.x, this.y, this.z, 0.35, 1.8)) wantC = true;
     this.crouch = clamp(this.crouch + (wantC ? 1 : -1) * dt * 4.2, 0, 1);
     this.h = lerp(1.8, 1.25, this.crouch);
-    this.leanA = damp(this.leanA, clamp(I.lean, -1, 1), 9, dt);
+    // у стены наклон ограничивается: луч в сторону наклона на уровне груди
+    let lw = clamp(I.lean, -1, 1);
+    if (lw !== 0) { const sn = Math.sin(this.yaw), cs = Math.cos(this.yaw), rx = cs * Math.sign(lw), rz = -sn * Math.sign(lw), hit = World.ray(this.x, this.y + 1.2 - 0.4 * this.crouch, this.z, rx, 0, rz, 0.7); if (hit) lw *= clamp((hit.t - 0.22) / 0.4, 0, 1); }
+    this.leanA = damp(this.leanA, lw, 11, dt);
     const adsT = I.ads && this.swapT <= 0 && this.reloadT < 0 && !this.healing && !this.sprinting && this.throwT < 0 && this.meleeT < 0 ? 1 : 0;
     this.ads = clamp(this.ads + (adsT ? 1 : -1) * dt / Math.max(0.1, this.weapon.def.adsTime * this.fx.adsT), 0, 1);
     const wants = I.mx !== 0 || I.mz !== 0;
@@ -2000,7 +2066,7 @@ class Combatant {
     if (spr) low = 1; else if (this.healing) low = 1;
     else if (this.ads > 0.1 || this.t - this.lastFireT < 1.2) low = 0;
     else low = this.isPlayer ? 0.0 : this.idleLow;
-    if (this.swapT > 0) low = Math.max(low, 0.9);
+    if (this.swapT > 0 && !(_CLIPW[this.weapon.def.id] && typeof m4Sample === 'function')) low = Math.max(low, 0.9);
     if (this.throwT >= 0 || this.meleeT >= 0) low = Math.max(low, 0.85);
     low = Math.max(low, this.wallLow);
     this.lowReady = damp(this.lowReady, low, 8, dt);
@@ -2030,21 +2096,26 @@ class Combatant {
     if (this.reloadT >= 0) {
       this.reloadT += dt;
       const p = this.reloadT / this.reloadDur, f = this.reloadFlags;
-      if (p > 0.2 && !f.out) { f.out = 1; Bus.emit('magout', this); }
-      if (p > 0.62 && !f.swap) {
+      const ev = REL_EV[w.def.id] ? REL_EV[w.def.id][this.reloadKind === 'empty' ? 'empty' : 'tac'] : null;
+      if (p > (ev ? ev.out : 0.2) && !f.out) { f.out = 1; Bus.emit('magout', this); }
+      if (p > (ev ? ev.swap : 0.62) && !f.swap) {
         f.swap = 1;
         let best = -1, bi = -1; w.reserve.forEach((m, i) => { if (m > best) { best = m; bi = i; } });
         if (bi >= 0 && best > 0) { const old = w.mag; w.mag = best; w.reserve.splice(bi, 1); if (old > 0) w.reserve.push(old); }
         Bus.emit('magin', this);
       }
-      if (p > 0.88 && this.reloadKind === 'empty' && !f.rack) { f.rack = 1; if (w.mag > 0) { w.mag--; w.chamber = 1; } Bus.emit('rack', this); }
+      if (p > (ev && ev.rack ? ev.rack : 0.88) && this.reloadKind === 'empty' && !f.rack) { f.rack = 1; if (w.mag > 0) { w.mag--; w.chamber = 1; } Bus.emit('rack', this); }
       if (this.reloadT >= this.reloadDur) { if (w.chamber < 1 && w.mag > 0) { w.mag--; w.chamber = 1; } this.reloadT = -1; }
     }
     // выстрел
     const ready = this.swapT <= 0 && this.reloadT < 0 && !this.healing && !this.sprinting && this.throwT < 0 && this.meleeT < 0;
-    if (I.fire && ready && this.fireT <= 0) {
-      if (!(w.mode === 'semi' && this.triggerHeld)) {
-        if (w.chamber > 0) this.shoot();
+    if (this.burstLeft > 0 && (!ready || w.mode !== 'burst')) this.burstLeft = 0; // очередь прервана перезарядкой, сменой оружия или режима
+    if (ready && this.fireT <= 0) {
+      if (this.burstLeft > 0) { // добираем очередь по 3 в темпе оружия
+        if (w.chamber > 0) { this.shoot(); if (--this.burstLeft === 0) this.fireT += 0.16; }
+        else { this.burstLeft = 0; Bus.emit('dry', this); }
+      } else if (I.fire && (w.mode === 'auto' || !this.triggerHeld)) { // одиночный и очередь — на каждое нажатие
+        if (w.chamber > 0) { this.shoot(); if (w.mode === 'burst') this.burstLeft = 2; }
         else if (!this.triggerHeld) { this.fireT = 0.2; Bus.emit('dry', this); }
       }
     }
@@ -2768,7 +2839,7 @@ function spawnBots(n, diffI, armor) {
     }
     if (!p) p = pick(pool);
     used.push(p);
-    const pr = ['m4', 'akm', 'cqb'][Math.floor(Math.random() * 3)];
+    const pr = PRIMARIES[Math.floor(Math.random() * PRIMARIES.length)];
     const b = new Combatant({
       att: ATT.rand(pr), name: CALLSIGNS[i % CALLSIGNS.length], team: Game.mode === 'ffa' ? 10 + i : 1, x: p[0], z: p[1], y: p[2], yaw: rnd(0, Math.PI * 2),
       primary: pr, armor, mags: 3 + rndi(0, 2), inv: { bandage: 2, tourniquet: 1, splint: 1, pills: 1, medPool: 140, frag: Math.random() < 0.6 ? 1 : 0, flash: Math.random() < 0.4 ? 1 : 0 },
@@ -2955,7 +3026,7 @@ const SV = {
   join(sendObj, sendRaw, name, pri, att) {
     const hs = this.humans();
     if (hs.length >= this.cfg.maxPlayers) return null;
-    const sl = { pid: this.nextPid++, human: true, name: String(name || 'Игрок').slice(0, 16), team: 0, c: null, kills: 0, deaths: 0, score: 0, pri: (pri === 'akm' || pri === 'cqb') ? pri : 'm4', att: ATT.clean((pri === 'akm' || pri === 'cqb') ? pri : 'm4', att), respT: 0, rtt: 80, ping: 0, lastSt: 0, lastShot: 0, joinT: this.now() };
+    const sl = { pid: this.nextPid++, human: true, name: String(name || 'Игрок').slice(0, 16), team: 0, c: null, kills: 0, deaths: 0, score: 0, pri: priOr(pri), att: ATT.clean(priOr(pri), att), respT: 0, rtt: 80, ping: 0, lastSt: 0, lastShot: 0, joinT: this.now() };
     this.slots.push(sl);
     sl.team = this.assignTeam(sl);
     if (this.idle) { this.idle = false; this.startMatch(this.cfg.rotation[this.rot % this.cfg.rotation.length]); }
@@ -3001,7 +3072,7 @@ const SV = {
     const mode = this.M.mode, sp = this.pickSpawn(sl.team, mode.team && !mode.coop);
     const yaw = Math.atan2(sp[0], sp[1]);
     const inv = sl.human ? { bandage: 3, tourniquet: 2, splint: 1, pills: 1, medPool: 220, frag: 2, flash: 1 } : { bandage: 2, tourniquet: 1, splint: 1, pills: 1, medPool: 140, frag: Math.random() < 0.6 ? 1 : 0, flash: Math.random() < 0.4 ? 1 : 0 };
-    const c = new Combatant({ name: sl.name, team: sl.team, x: sp[0], z: sp[1], y: sp[2], yaw, primary: sl.human ? sl.pri : (sl.pr = ['m4', 'akm', 'cqb'][Math.floor(Math.random() * 3)]), att: sl.human ? sl.att : ATT.rand(sl.pr), armor: this.cfg.armor, mags: sl.human ? 5 : 3 + rndi(0, 2), inv });
+    const c = new Combatant({ name: sl.name, team: sl.team, x: sp[0], z: sp[1], y: sp[2], yaw, primary: sl.human ? sl.pri : (sl.pr = PRIMARIES[Math.floor(Math.random() * PRIMARIES.length)]), att: sl.human ? sl.att : ATT.rand(sl.pr), armor: this.cfg.armor, mags: sl.human ? 5 : 3 + rndi(0, 2), inv });
     c.slot = sl; sl.c = c;
     if (sl.human) { c.isHuman = true; c.netMode = 'human'; c.pid = sl.pid; c.protT = 2.5; c.weapons[1].reserve = [17, 17, 17]; c.protT = 2.5; }
     else {
@@ -3262,7 +3333,7 @@ const SV = {
       }
       case 'chat': { const txt = String(m.m || '').slice(0, 120).replace(/[<>]/g, ''); if (txt) this.bcast({ t: 'chat', n: sl.name, tm: sl.team, m: txt }); break; }
       case 'fall': if (c && c.alive && m.v > 9.5 && m.v < 40) Combat.fallDamage(c, +m.v); break;
-      case 'ld': sl.pri = (m.pri === 'akm' || m.pri === 'cqb') ? m.pri : 'm4'; break;
+      case 'ld': sl.pri = priOr(m.pri); break;
       case 'ping': sl.rtt = clamp(+m.rtt || sl.rtt, 0, 2000); this.send(sl, { t: 'pong', c: m.c, T: Game.time }); break;
     }
   },
