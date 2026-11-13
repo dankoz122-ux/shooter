@@ -8,7 +8,10 @@ const TICK = 30;
 // ---- загрузка общей симуляции (та же, что в браузере) ----
 vm.runInThisContext(fs.readFileSync(path.join(__dirname, 'sim.js'), 'utf8'), { filename: 'sim.js' });
 const { SV, World, Game, NET, Bus } = globalThis.__SV;
-const MAPID = (process.env.MAP || 'poly').toLowerCase();
+const { MAPS, registerCustomMap } = globalThis.__SV;
+let MAPID = (process.env.MAP || 'poly').toLowerCase();
+if (process.env.MAPFILE) { const info = registerCustomMap(fs.readFileSync(path.resolve(process.env.MAPFILE), 'utf8')); MAPID = info.id; console.log('карта из файла:', info.id, info.warn.join('; ')); }
+if (!MAPS[MAPID]) { console.log('нет карты', MAPID, '— доступны:', Object.keys(MAPS).join(', ')); process.exit(1); }
 World.generate(MAPID);
 Game.resetNet(); Game.noRagdoll = true; Game.lagComp = true; Game.noFF = true; Game.netServer = true;
 const env = process.env;
@@ -21,7 +24,14 @@ if (env.DIFF) SV.cfg.diff = Math.max(0, Math.min(3, +env.DIFF));
 if (env.ARMOR) SV.cfg.armor = +env.ARMOR;
 if (env.MAX_PLAYERS) SV.cfg.maxPlayers = Math.max(1, Math.min(16, +env.MAX_PLAYERS));
 if (env.SNAP_HZ) SV.cfg.snapHz = Math.max(10, Math.min(30, +env.SNAP_HZ));
-const mapSum = (() => { let s = 0; World.boxes.forEach((b, i) => { s += (b.x0 + b.x1 + b.z0 + b.z1 + b.y1) * (i % 7 + 1); }); return Math.round(s) + ':' + Math.round(World.H(30, -20) * 100) + ':' + World.pickups.length; })();
+const calcMapSum = () => { let s = 0; World.boxes.forEach((b, i) => { s += (b.x0 + b.x1 + b.z0 + b.z1 + b.y1) * (i % 7 + 1); }); return Math.round(s) + ':' + Math.round(World.H(30, -20) * 100) + ':' + World.pickups.length; };
+let mapSum = calcMapSum();
+SV.mapSum = () => (mapSum = calcMapSum());
+// голосование за карту: MAPVOTE=0 выключает, VOTE_T — секунд на голосование, MAPLIST — какие карты участвуют (id через запятую)
+if (env.MATCH_T) SV.cfg.matchT = Math.max(5, +env.MATCH_T || 0) || undefined; // длительность матча в секундах (для тестов; по умолчанию у каждого режима своя)
+if (env.MAPVOTE === '0') SV.cfg.voteT = 0;
+if (env.VOTE_T) SV.cfg.voteT = Math.max(0, Math.min(60, +env.VOTE_T || 0));
+if (env.MAPLIST) SV.cfg.mapPool = env.MAPLIST.split(',').map(s => s.trim().toLowerCase()).filter(id => MAPS[id]);
 console.log('карта', mapSum, '| режимы:', SV.cfg.rotation.join(','), '| порт', PORT);
 
 // ---- HTTP ----
@@ -101,15 +111,16 @@ function onMessage(conn, s) {
   if (!conn.slot) {
     if (m.t !== 'hello') return;
     if (m.v !== NET.VER) { wsSend(conn.sock, JSON.stringify({ t: 'err', m: 'Версия клиента не совпадает с сервером. Обновите страницу.' })); conn.sock.end(); return; }
-    const sl = SV.join(null, null, m.name, m.pri, m.att);
+    const sl = SV.join(null, null, m.name, m.pri, m.att, m.look);
     if (!sl) { wsSend(conn.sock, JSON.stringify({ t: 'err', m: 'Сервер заполнен' })); conn.sock.end(); return; }
     sl.ws = conn.sock; conn.slot = sl;
     const ents = Game.combatants.filter(c => c !== sl.c).map(c => Object.assign(NET.info(c), { st: NET.pack(c), al: c.alive ? 1 : 0 }));
     const sp = sl.c ? { e: sl.c.id, x: sl.c.x, y: sl.c.y, z: sl.c.z, yaw: sl.c.yaw, pri: sl.pri, att: sl.att, team: sl.team, inv: sl.c.inv } : null;
-    wsSend(conn.sock, JSON.stringify({ t: 'welcome', pid: sl.pid, T: Game.time, map: mapSum, mapId: World.mapId, snapHz: SV.cfg.snapHz, spawn: sp, ents, pk: World.pickups.map((p, i) => p.taken ? i : -1).filter(i => i >= 0), name: sl.name }));
+    wsSend(conn.sock, JSON.stringify({ t: 'welcome', pid: sl.pid, T: Game.time, map: mapSum, mapId: World.mapId, mapData: MAPS[World.mapId].custom ? MAPS[World.mapId].data : undefined, snapHz: SV.cfg.snapHz, spawn: sp, ents, pk: World.pickups.map((p, i) => p.taken ? i : -1).filter(i => i >= 0), name: sl.name }));
     SV.bcast({ t: 'chat', n: '', m: sl.name + ' подключился' }, sl);
     SV.sendBoard(true);
     if (SV.M) wsSend(conn.sock, JSON.stringify({ t: 'match', id: SV.M.mode.id, ru: SV.M.mode.ru, team: SV.M.mode.team, coop: !!SV.M.mode.coop }));
+    SV.voteSync(sl);
     console.log('+', sl.name, '(' + SV.humans().length + ')');
     return;
   }
